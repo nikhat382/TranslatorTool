@@ -44,7 +44,7 @@ async function detectLanguage(text) {
     const sampleText = text.substring(0, 500);
 
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-pro",
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 50,
@@ -88,7 +88,7 @@ async function translateWithGeminiText(text, sourceLang, targetLang) {
     const startTime = Date.now();
 
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-pro",
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 8192,
@@ -152,7 +152,7 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
     const startTime = Date.now();
 
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-pro",
       generationConfig: {
         temperature: 0.3,
         maxOutputTokens: 2048,
