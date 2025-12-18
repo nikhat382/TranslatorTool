@@ -1,0 +1,41 @@
+.env
+node_modules/
+uploads/
+
+
+# Node / Backend
+node_modules/
+.env
+.env.local
+.env.development
+.env.production
+
+# Frontend Build
+dist/
+build/
+.vite/
+
+# Logs
+logs/
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Uploads / Temp
+uploads/
+temp/
+translated/
+.env
+node_modules/
+dist/
+build/
+.env
+node_modules/
+dist/
+build/
+.backend/node_modules/
+
