@@ -3,16 +3,15 @@ import multer from 'multer';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname } from 'path';
 import fs from 'fs/promises';
+import { createRequire } from 'module';
 import mammoth from 'mammoth';
 import Tesseract from 'tesseract.js';
 import PDFDocument from 'pdfkit';
-import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const pdfParse = require('pdf-parse');
 
 dotenv.config();
 
@@ -21,59 +20,12 @@ const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 }
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Serve static files from the SPA dist folder
-app.use(express.static(join(__dirname, '../spa/dist')));
+// ============== GOOGLE GEMINI TRANSLATION (PRIMARY - FREE!) ==============
 
-// ============== LANGUAGE DETECTION ==============
-
-async function detectLanguage(text) {
-  console.log('🔍 Detecting document language...');
-
-  if (!process.env.GEMINI_API_KEY) {
-    console.log('⚠️ No GEMINI_API_KEY for language detection');
-    return null;
-  }
-
-  try {
-    const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-    // Take first 500 characters for detection
-    const sampleText = text.substring(0, 500);
-
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 50,
-      }
-    });
-
-    const prompt = `Detect the language of this text and respond with ONLY ONE WORD from these options: English, Spanish, French, German, Mandarin, or Hindi. Do not include any explanations or additional text.
-
-Text: ${sampleText}
-
-Language (respond with exactly one word):`;
-
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const detectedLanguage = response.text().trim().toLowerCase();
-
-    console.log(`✅ Detected language: ${detectedLanguage}`);
-    return detectedLanguage;
-  } catch (error) {
-    console.error('❌ Language detection failed:', error.message);
-    return null;
-  }
-}
-
-// ============== GOOGLE GEMINI TEXT TRANSLATION (PRIMARY - FREE!) ==============
-
-async function translateWithGeminiText(text, sourceLang, targetLang) {
-  console.log('🤖 PRIMARY METHOD: Google Gemini Text (FREE)...');
-
+async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename) {
+  console.log('🤖 PRIMARY METHOD: Google Gemini (FREE)...');
+  
   if (!process.env.GEMINI_API_KEY) {
     console.log('⚠️ No GEMINI_API_KEY found');
     console.log('💡 Get free key at: https://aistudio.google.com/app/apikey');
@@ -83,82 +35,30 @@ async function translateWithGeminiText(text, sourceLang, targetLang) {
   try {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-    console.log(`📤 Sending ${text.length} characters to Gemini (free tier)...`);
-    const startTime = Date.now();
-
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 8192,
-      }
-    });
-
-    const prompt = `Translate from ${sourceLang} to ${targetLang}. Preserve ALL formatting and structure. Output ONLY the translation:\n\n${text}`;
-
-    // Add timeout wrapper
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Gemini timeout')), 30000)
-    );
-
-    const result = await Promise.race([
-      model.generateContent(prompt),
-      timeoutPromise
-    ]);
-
-    const response = await result.response;
-    const translated = response.text();
-
-    const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
-
-    console.log(`✅ Gemini Text completed in ${elapsedTime}s`);
-    console.log(`📊 Translation: ${translated.length} characters`);
-    console.log(`📝 First 200 chars: ${translated.substring(0, 200)}`);
-
-    return translated;
-  } catch (error) {
-    console.error('❌ Gemini Text FAILED:', error.message);
-    return null;
-  }
-}
-
-// ============== GOOGLE GEMINI VISION TRANSLATION (FOR IMAGES) ==============
-
-async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename) {
-  console.log('🤖 Google Gemini Vision (FREE)...');
-
-  if (!process.env.GEMINI_API_KEY) {
-    console.log('⚠️ No GEMINI_API_KEY found');
-    return null;
-  }
-
-  try {
-    const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
+    
     const fileBuffer = await fs.readFile(filePath);
     const base64 = fileBuffer.toString('base64');
-
+    
     console.log(`📊 File details: ${mimetype}, ${(fileBuffer.length / 1024).toFixed(2)} KB`);
-
+    
     // Gemini supports images
     if (!mimetype.startsWith('image/')) {
-      console.log('⚠️ Gemini Vision works only with images');
+      console.log('⚠️ Gemini works best with images');
       return null;
     }
 
     console.log(`📤 Sending to Gemini Vision (free tier)...`);
     const startTime = Date.now();
 
-    const model = genAI.getGenerativeModel({
+    // Use stable model name
+    const model = genAI.getGenerativeModel({ 
       model: "gemini-1.5-flash",
       generationConfig: {
         temperature: 0.3,
         maxOutputTokens: 2048,
       }
     });
-
+    
     const prompt = `Translate this document from ${sourceLang} to ${targetLang}.
 
 REQUIREMENTS:
@@ -178,18 +78,30 @@ Translate now:`;
         }
       }
     ]);
-
+    
     const response = await result.response;
     const translated = response.text();
-
+    
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
-
-    console.log(`✅ Gemini Vision completed in ${elapsedTime}s`);
+    
+    console.log(`✅ Gemini completed in ${elapsedTime}s`);
     console.log(`📊 Translation: ${translated.length} characters`);
-
+    console.log(`📝 First 200 chars: ${translated.substring(0, 200)}`);
+    
     return translated;
   } catch (error) {
-    console.error('❌ Gemini Vision FAILED:', error.message);
+    console.error('❌ Gemini FAILED');
+    console.error('❌ Error:', error.message);
+    
+    if (error.message?.includes('API key')) {
+      console.error('⚠️ Invalid API key - get a new one at https://aistudio.google.com/app/apikey');
+    } else if (error.message?.includes('quota')) {
+      console.error('⚠️ Free quota exceeded - wait a minute or upgrade');
+    } else if (error.message?.includes('not found')) {
+      console.error('⚠️ Model not available');
+      console.error('💡 Try: npm install @google/generative-ai@latest');
+    }
+    
     return null;
   }
 }
@@ -329,58 +241,6 @@ Begin translation now:`
   }
 }
 
-// ============== GPT-4o TEXT TRANSLATION (HIGH PRIORITY FOR TEXT) ==============
-
-async function translateWithGPT4Text(text, sourceLang, targetLang) {
-  console.log('🤖 GPT-4o Text Translation...');
-
-  if (!process.env.OPENAI_API_KEY) {
-    console.log('⚠️ No OPENAI_API_KEY found');
-    return null;
-  }
-
-  try {
-    const OpenAI = (await import('openai')).default;
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-    console.log(`📤 Sending ${text.length} characters to GPT-4o-mini...`);
-    const startTime = Date.now();
-
-    // Add timeout wrapper
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('GPT timeout')), 25000)
-    );
-
-    const response = await Promise.race([
-      openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        max_tokens: 4000,
-        temperature: 0.1,
-        messages: [{
-          role: "system",
-          content: "Professional translator. Preserve formatting. Output ONLY translation."
-        }, {
-          role: "user",
-          content: `${sourceLang} to ${targetLang}:\n\n${text}`
-        }]
-      }),
-      timeoutPromise
-    ]);
-
-    const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
-    const translated = response.choices[0].message.content;
-
-    console.log(`✅ GPT-4o-mini completed in ${elapsedTime}s`);
-    console.log(`📊 Translation: ${translated.length} characters`);
-    console.log(`📝 First 200 chars: ${translated.substring(0, 200)}`);
-
-    return translated;
-  } catch (error) {
-    console.error('❌ GPT-4o Text FAILED:', error.message);
-    return null;
-  }
-}
-
 // ============== GPT-4 VISION TRANSLATION (SECONDARY METHOD) ==============
 
 async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLang, filename) {
@@ -496,14 +356,14 @@ Translate the complete document now:`
 
 async function ocrWithTesseract(filePath, language = 'eng') {
   console.log(`🔍 OCR Method: Tesseract.js (${language})...`);
-
+  
   try {
-    // Map common languages to Tesseract codes
+    // Map to Tesseract codes
     const langMap = {
-      'english': 'eng', 'spanish': 'spa', 'french': 'fra', 'german': 'deu',
+      'spanish': 'spa', 'english': 'eng', 'french': 'fra', 'german': 'deu',
       'mandarin': 'chi_sim', 'hindi': 'hin'
     };
-
+    
     const tesseractLang = langMap[language.toLowerCase()] || 'eng';
     
     const { data: { text } } = await Tesseract.recognize(
@@ -545,10 +405,10 @@ async function ocrWithOCRSpace(filePath, mimetype, language = 'eng') {
     
     // Map languages to OCR.space codes
     const langMap = {
-      'english': 'eng', 'spanish': 'spa', 'french': 'fre', 'german': 'ger',
+      'spanish': 'spa', 'english': 'eng', 'french': 'fre', 'german': 'ger',
       'mandarin': 'chs', 'hindi': 'hin'
     };
-
+    
     const ocrLang = langMap[language.toLowerCase()] || 'eng';
     
     const response = await fetch('https://api.ocr.space/parse/image', {
@@ -594,32 +454,18 @@ async function extractText(filePath, mimetype, filename) {
   console.log(`📄 Extracting text from: ${filename}`);
   
   try {
-    // Images - Skip OCR entirely if using Gemini
-    // if (mimetype.startsWith('image/')) {
-    //   console.log('✅ Image detected - will use AI vision (no OCR needed)');
-    //   // Return minimal text just for metrics
-    //   return 'Document will be processed by AI vision';
-    // }
-    
+    // Images - Skip text extraction entirely, let AI vision handle it
+    if (mimetype.startsWith('image/')) {
+      console.log('✅ Image detected - skipping text extraction (AI will read directly)');
+      return 'Image document - will be processed by AI vision';
+    }
     
     // PDFs
     if (mimetype === 'application/pdf' || filename.endsWith('.pdf')) {
       const buffer = await fs.readFile(filePath);
-      // Use pdf-parse v2 API
-      const { PDFParse } = require('pdf-parse');
-      const parser = new PDFParse({ data: buffer });
-      const result = await parser.getText();
-
-      console.log(`✅ PDF extraction complete`);
-      console.log(`📊 Result structure:`, Object.keys(result));
-      console.log(`📄 Text length: ${result.text?.length || 0} chars`);
-      console.log(`📝 First 200 chars:`, result.text?.substring(0, 200));
-
-      if (!result.text || result.text.length === 0) {
-        throw new Error('PDF extraction returned empty text. The PDF might be image-based or corrupted.');
-      }
-
-      return result.text; // Don't use cleanText, return raw text
+      const data = await pdfParse(buffer);
+      console.log(`✅ PDF: ${data.text.length} chars`);
+      return cleanText(data.text);
     }
     
     // DOCX
@@ -629,24 +475,30 @@ async function extractText(filePath, mimetype, filename) {
       return result.value;
     }
     
-    // Text files
-    const content = await fs.readFile(filePath, 'utf8');
-    console.log(`✅ Text file: ${content.length} chars`);
-    return content;
+    // Text files only
+    if (mimetype.startsWith('text/') || filename.endsWith('.txt')) {
+      const content = await fs.readFile(filePath, 'utf8');
+      console.log(`✅ Text file: ${content.length} chars`);
+      return content;
+    }
+    
+    // For other types, use placeholder
+    console.log('⚠️ Unknown file type - will use AI vision');
+    return 'Document will be processed by AI vision';
     
   } catch (error) {
     console.error('❌ Text extraction failed:', error.message);
-    throw error;
+    return 'Document will be processed by AI vision';
   }
 }
 
 // ============== FALLBACK TRANSLATIONS ==============
 
-function chunkText(text, maxSize = 2000) {
+function chunkText(text, maxSize = 1500) {
   const sentences = text.split(/(?<=[.!?])\s+/);
   const chunks = [];
   let current = '';
-
+  
   for (const sent of sentences) {
     if ((current + sent).length > maxSize && current) {
       chunks.push(current.trim());
@@ -655,7 +507,7 @@ function chunkText(text, maxSize = 2000) {
       current += (current ? ' ' : '') + sent;
     }
   }
-
+  
   if (current) chunks.push(current.trim());
   return chunks;
 }
@@ -663,11 +515,7 @@ function chunkText(text, maxSize = 2000) {
 async function translateGoogle(text, sl, tl) {
   try {
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${tl}&dt=t&q=${encodeURIComponent(text)}`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
+    const res = await fetch(url);
     const data = await res.json();
     return data?.[0]?.map(i => i[0]).join('') || null;
   } catch { return null; }
@@ -675,44 +523,33 @@ async function translateGoogle(text, sl, tl) {
 
 async function translateLibre(text, source, target) {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
-
     const res = await fetch('https://libretranslate.com/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q: text, source, target, format: 'text' }),
-      signal: controller.signal
+      body: JSON.stringify({ q: text, source, target, format: 'text' })
     });
-    clearTimeout(timeoutId);
     const data = await res.json();
     return data.translatedText || null;
   } catch { return null; }
 }
 
-async function translateDeepL(text, sourceLang, targetLang) {
+async function translateMyMemory(text, sourceLang, targetLang) {
   try {
     const langMap = {
-      english: 'en', spanish: 'es', french: 'fr', german: 'de',
+      spanish: 'es', english: 'en', french: 'fr', german: 'de',
       mandarin: 'zh', hindi: 'hi'
     };
-
+    
     const sl = langMap[sourceLang.toLowerCase()] || 'auto';
     const tl = langMap[targetLang.toLowerCase()] || 'en';
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000); // 6 second timeout
-
-    const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sl}|${tl}`, {
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
+    
+    const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sl}|${tl}`);
     const data = await res.json();
-
+    
     if (data.responseData?.translatedText) {
       return data.responseData.translatedText;
     }
-
+    
     return null;
   } catch { return null; }
 }
@@ -728,7 +565,7 @@ async function translateOpenRouter(text, sourceLang, targetLang) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp:free',
+        model: 'google/gemini-1.5-flash-exp:free',
         messages: [{
           role: 'user',
           content: `Translate ALL text from ${sourceLang} to ${targetLang}. Keep structure. Output ONLY translation:\n\n${text}`
@@ -744,59 +581,50 @@ async function translateOpenRouter(text, sourceLang, targetLang) {
 }
 
 async function translateFallback(text, sourceLang, targetLang) {
-  console.log(`\n🔄 FALLBACK: Using basic translation engines...`);
-
+  console.log(`\n🔄 FALLBACK: Using FREE translation APIs...`);
+  
   const langMap = {
-    english: 'en', spanish: 'es', french: 'fr', german: 'de',
-    mandarin: 'zh-CN', hindi: 'hi'
+    spanish: 'es', english: 'en', french: 'fr', german: 'de',
+    mandarin: 'zh', hindi: 'hi'
   };
-
+  
   const sl = langMap[sourceLang.toLowerCase()] || 'auto';
   const tl = langMap[targetLang.toLowerCase()] || 'en';
-
-  console.log(`🌐 Translating: ${sl} → ${tl}`);
-
-  // Small text - try services in parallel for speed
-  if (text.length < 4000) {
-    console.log('📦 Fast parallel translation...');
-
-    // Try all services simultaneously and use first success
-    const results = await Promise.allSettled([
-      translateGoogle(text, sl, tl),
-      translateDeepL(text, sourceLang, targetLang),
-      translateLibre(text, sl, tl)
-    ]);
-
-    for (const result of results) {
-      if (result.status === 'fulfilled' && result.value) {
-        console.log('✅ Translation successful');
-        return result.value;
-      }
-    }
-
-    // Last resort: OpenRouter
-    const result = await translateOpenRouter(text, sourceLang, targetLang);
-    if (result) { console.log('✅ OpenRouter'); return result; }
-
-    throw new Error('All fallback translation services failed');
+  
+  console.log(`🌐 Translating: ${sourceLang} (${sl}) → ${targetLang} (${tl})`);
+  
+  // Small text - single call
+  if (text.length < 3000) {
+    console.log('📦 Single translation...');
+    
+    let result = await translateGoogle(text, sl, tl);
+    if (result) { console.log('✅ Google Translate (FREE)'); return result; }
+    
+    result = await translateMyMemory(text, sourceLang, targetLang);
+    if (result) { console.log('✅ MyMemory API (FREE)'); return result; }
+    
+    result = await translateLibre(text, sl, tl);
+    if (result) { console.log('✅ LibreTranslate (FREE)'); return result; }
+    
+    throw new Error('All free translation services failed');
   }
-
-  // Large text - parallel chunks (optimized with larger chunks)
+  
+  // Large text - parallel chunks
   console.log('📦 Parallel chunk translation...');
-  const chunks = chunkText(text, 2000);
-  console.log(`📦 Processing ${chunks.length} chunks in parallel`);
-
+  const chunks = chunkText(text, 1500);
+  console.log(`📦 Processing ${chunks.length} chunks`);
+  
   const translated = await Promise.all(
     chunks.map(async (chunk, i) => {
-      // Try Google first (fastest), then others
       let result = await translateGoogle(chunk, sl, tl);
-      if (!result) result = await translateDeepL(chunk, sourceLang, targetLang);
-      if (!result) result = chunk; // Keep original if all fail
+      if (!result) result = await translateMyMemory(chunk, sourceLang, targetLang);
+      if (!result) result = await translateLibre(chunk, sl, tl);
+      if (!result) result = chunk;
       console.log(`✅ Chunk ${i + 1}/${chunks.length}`);
       return result;
     })
   );
-
+  
   return translated.join(' ');
 }
 
@@ -810,74 +638,67 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
   console.log(`📝 Extracted text length: ${extractedText.length} characters`);
   console.log(`📝 First 100 chars: ${extractedText.substring(0, 100)}`);
   console.log('='.repeat(80));
-
+  
   let translatedText = null;
-
-  // FOR TEXT FILES (PDF, DOCX, TXT) - Use TEXT-based translation
-  if (!mimetype.startsWith('image/')) {
-    console.log('📝 Text-based document detected - using text translation APIs');
-
-    // PRIORITY 1: Google Gemini Text (FREE - Best for text)
-    console.log('\n🔄 PRIORITY 1: Trying Gemini Text Translation (FREE)...');
-    translatedText = await translateWithGeminiText(extractedText, sourceLang, targetLang);
-
-    if (translatedText && translatedText.length > 50) {
-      console.log('✅ SUCCESS: Gemini Text translation completed');
-      console.log(`📊 Output: ${translatedText.length} characters`);
-      return translatedText;
-    }
-
-    // PRIORITY 2: GPT-4o-mini Text (Reliable backup)
-    console.log('\n🔄 PRIORITY 2: Trying GPT-4o-mini Text Translation...');
-    translatedText = await translateWithGPT4Text(extractedText, sourceLang, targetLang);
-
-    if (translatedText && translatedText.length > 50) {
-      console.log('✅ SUCCESS: GPT-4o-mini Text translation completed');
-      return translatedText;
-    }
-
-    // PRIORITY 3: Free fallback APIs
-    console.log('\n🔄 PRIORITY 3: Trying free translation APIs...');
-    translatedText = await translateFallback(extractedText, sourceLang, targetLang);
-
-    if (translatedText && translatedText.length > 10) {
-      console.log('✅ Fallback translation completed');
-      return translatedText;
-    }
-  }
-
-  // FOR IMAGES - Use VISION-based translation
+  
+  // PRIORITY 1: Google Gemini (FREE, no payment needed!)
   if (mimetype.startsWith('image/')) {
-    console.log('🖼️ Image document detected - using vision APIs');
-
-    // PRIORITY 1: Google Gemini Vision (FREE)
-    console.log('\n🔄 Trying Gemini Vision (FREE)...');
+    console.log('✅ File type compatible with Gemini Vision (Image)');
+    console.log('🔄 Attempting Google Gemini translation (FREE)...');
+    
     translatedText = await translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename);
-
-    if (translatedText && translatedText.length > 50) {
-      console.log('✅ SUCCESS: Gemini Vision completed');
+    
+    if (translatedText && translatedText.length > extractedText.length * 0.3) {
+      console.log('✅ SUCCESS: Gemini translation completed');
+      console.log(`📊 Translation quality check: ${translatedText.length} chars (original: ${extractedText.length})`);
+      console.log('🎉 Using FREE high-quality AI translation\n');
       return translatedText;
+    } else if (translatedText) {
+      console.log(`⚠️ Gemini translation too short: ${translatedText.length} chars`);
+    } else {
+      console.log('❌ Gemini returned null - check error messages above\n');
     }
-
-    // PRIORITY 2: GPT-4o-mini Vision
-    console.log('\n🔄 Trying GPT-4o-mini Vision...');
+  }
+  
+  // PRIORITY 2: GPT-4 Vision (if Gemini fails)
+  if (mimetype === 'application/pdf' || mimetype.startsWith('image/')) {
+    console.log('🔄 Trying GPT-4 Vision as backup...');
+    
     translatedText = await translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLang, filename);
-
-    if (translatedText && translatedText.length > 50) {
-      console.log('✅ SUCCESS: GPT-4o-mini Vision completed');
-      return translatedText;
-    }
-
-    // PRIORITY 3: Claude Vision
-    console.log('\n🔄 Trying Claude Vision...');
-    translatedText = await translateWithClaude(filePath, mimetype, sourceLang, targetLang, filename);
-
-    if (translatedText && translatedText.length > 50) {
-      console.log('✅ SUCCESS: Claude Vision completed');
+    
+    if (translatedText && translatedText.length > extractedText.length * 0.3) {
+      console.log('✅ SUCCESS: GPT-4 Vision translation completed');
       return translatedText;
     }
   }
-
+  
+  // PRIORITY 3: Claude API
+  if (mimetype === 'application/pdf' || mimetype.startsWith('image/')) {
+    console.log('\n🔄 Trying Claude API...');
+    translatedText = await translateWithClaude(filePath, mimetype, sourceLang, targetLang, filename);
+    
+    if (translatedText && translatedText.length > extractedText.length * 0.3) {
+      console.log('✅ SUCCESS: Claude API translation completed');
+      return translatedText;
+    }
+  }
+  
+  // PRIORITY 3: Fallback to basic translation
+  console.log('\n⚠️⚠️⚠️ WARNING: Using FALLBACK translation methods ⚠️⚠️⚠️');
+  console.log('⚠️ AI vision methods (GPT-4/Claude) unavailable');
+  console.log('⚠️ Translation quality will be LOWER - may have errors');
+  console.log('⚠️ Formatting and structure preservation LIMITED');
+  console.log('⚠️ Using: Google Translate + LibreTranslate + OCR');
+  console.log('='.repeat(80) + '\n');
+  
+  translatedText = await translateFallback(extractedText, sourceLang, targetLang);
+  
+  if (translatedText && translatedText.length > 10) {
+    console.log('✅ Fallback translation completed (lower quality)');
+    console.log('💡 TIP: Add OpenAI or Claude credits for better results\n');
+    return translatedText;
+  }
+  
   throw new Error('All translation methods failed');
 }
 
@@ -886,10 +707,7 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
 app.post('/api/translate', upload.single('file'), async (req, res) => {
   const startTime = Date.now();
   let filePath = null;
-
-  // Set UTF-8 encoding for response
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-
+  
   try {
     const { sourceLang, targetLang } = req.body;
     const file = req.file;
@@ -912,71 +730,8 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
 
     // Extract text (quick for images now - no OCR)
     const originalText = await extractText(file.path, file.mimetype, file.originalname);
-
+    
     console.log(`\n📝 Text extraction complete`);
-
-    // Validate file type
-    const validFileTypes = ['image/jpeg', 'image/jpg', 'application/pdf', 'application/json', 'text/plain'];
-    const validExtensions = ['.jpg', '.jpeg', '.pdf', '.json', '.txt'];
-    const fileExtension = file.originalname.substring(file.originalname.lastIndexOf('.')).toLowerCase();
-
-    if (!validFileTypes.includes(file.mimetype) && !validExtensions.includes(fileExtension)) {
-      throw new Error(`Unsupported file type. Please upload only JPG, PDF, JSON, or TXT files. You uploaded: ${file.originalname}`);
-    }
-
-    // Detect language and validate
-    if (originalText && originalText.length > 20) {
-      console.log('\n🔍 Validating document language...');
-      const detectedLang = await detectLanguage(originalText);
-
-      if (detectedLang) {
-        // Normalize language names for comparison
-        const normalizeLanguage = (lang) => {
-          const langMap = {
-            'spanish': 'spanish',
-            'french': 'french',
-            'german': 'german',
-            'mandarin': 'mandarin',
-            'mandarin chinese': 'mandarin',
-            'chinese': 'mandarin',
-            'english': 'english',
-            'hindi': 'hindi'
-          };
-          return langMap[lang.toLowerCase()] || lang.toLowerCase();
-        };
-
-        const normalizedDetected = normalizeLanguage(detectedLang);
-        const normalizedSelected = normalizeLanguage(sourceLang);
-
-        console.log(`📊 Language Check: Selected="${normalizedSelected}", Detected="${normalizedDetected}"`);
-
-        // Check if detected language is supported (including English for reverse translation)
-        const supportedLanguages = ['english', 'spanish', 'french', 'german', 'mandarin', 'hindi'];
-        const detectedLanguageName = detectedLang.charAt(0).toUpperCase() + detectedLang.slice(1);
-        const selectedLanguageName = sourceLang.charAt(0).toUpperCase() + sourceLang.slice(1);
-
-        if (!supportedLanguages.includes(normalizedDetected)) {
-          console.log('❌ Unsupported language detected!');
-          throw new Error(
-            `Unsupported language detected! Your document appears to be in ${detectedLanguageName}, which is not supported.\n\n` +
-            `✅ Supported languages: English, Spanish, French, German, Mandarin Chinese, and Hindi.\n\n` +
-            `Please upload a document in one of the supported languages.`
-          );
-        }
-
-        if (normalizedDetected !== normalizedSelected) {
-          console.log('❌ Language mismatch detected!');
-          throw new Error(
-            `Language mismatch detected! Your document appears to be in ${detectedLanguageName}, but you selected ${selectedLanguageName} as the source language.\n\n` +
-            `Please select the correct source language: ${detectedLanguageName}`
-          );
-        }
-
-        console.log('✅ Language validation passed');
-      } else {
-        console.log('⚠️ Could not detect language - proceeding with translation');
-      }
-    }
 
     // Perform translation using orchestrator
     const translatedText = await translateDocument(
@@ -1052,7 +807,7 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
           characterCount: translatedText.length,
           sentenceCount: translatedSents.length,
           processedAt: new Date().toLocaleString(),
-          model: "Google Gemini 1.5 Flash (Free Tier)",
+          model: "Google gemini-1.5-flash (Free Tier)",
           sourceLanguage: sourceLang,
           targetLanguage: targetLang,
           languagePair: `${sourceLang} → ${targetLang}`,
@@ -1336,57 +1091,34 @@ app.post('/api/test-translate', express.json(), async (req, res) => {
   }
 });
 
-// Catch-all route: serve SPA for any non-API routes (must be last!)
-app.use((req, res, next) => {
-  // If the request is not for an API route and not for a static file, serve the SPA
-  if (!req.path.startsWith('/api') && !req.path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
-    res.sendFile(join(__dirname, '../spa/dist/index.html'));
-  } else {
-    next();
-  }
-});
-
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(80));
-  console.log('⚡ TRANSLATRIX PRO - MULTILINGUAL DOCUMENT TRANSLATOR');
+  console.log('⚡ ADVANCED DOCUMENT TRANSLATOR - FREE TIER ENABLED');
   console.log('='.repeat(80));
   console.log(`📍 Server: http://localhost:${PORT}`);
   console.log(`🏥 Health: http://localhost:${PORT}/api/health`);
   console.log('');
-  console.log('🔧 TEXT TRANSLATION ENGINES (Priority Order):');
-  console.log(`   1. Gemini Text 🆓    ${process.env.GEMINI_API_KEY ? '✅ FREE - Best for text!' : '❌ Get key at aistudio.google.com'}`);
-  console.log(`   2. GPT-4o-mini Text  ${process.env.OPENAI_API_KEY ? '✅ High quality backup' : '❌'}`);
-  console.log(`   3. Free APIs         ✅ Google Translate, MyMemory, LibreTranslate`);
+  console.log('🔧 TRANSLATION ENGINES (Priority Order):');
+  console.log(`   1. GPT-4o-mini Vision ⚡ ${process.env.OPENAI_API_KEY ? '✅ (You have credits - FAST!)' : '❌'}`);
+  console.log(`   2. Google Gemini      ${process.env.GEMINI_API_KEY ? '✅ FREE backup' : '❌'}`);
+  console.log(`   3. Free APIs          ✅ (Google Translate, MyMemory, LibreTranslate)`);
   console.log('');
-  console.log('🖼️ IMAGE TRANSLATION ENGINES (Priority Order):');
-  console.log(`   1. Gemini Vision 🆓  ${process.env.GEMINI_API_KEY ? '✅ FREE' : '❌'}`);
-  console.log(`   2. GPT-4o-mini Vision ${process.env.OPENAI_API_KEY ? '✅' : '❌'}`);
-  console.log(`   3. Claude Vision      ${process.env.ANTHROPIC_API_KEY ? '✅' : '❌'}`);
+  console.log('🌍 SUPPORTED LANGUAGES:');
+  console.log('   Source: Spanish, French, German, Mandarin, Hindi, English');
+  console.log('   Target: English (or reverse: English → Any source language)');
   console.log('');
-  console.log('🌐 SUPPORTED SOURCE LANGUAGES → ENGLISH:');
-  console.log('   • Spanish → English');
-  console.log('   • French → English');
-  console.log('   • German → English');
-  console.log('   • Mandarin Chinese → English');
-  console.log('   • Hindi → English');
-  console.log('   • Full UTF-8 support for Chinese & Hindi characters');
-  console.log('');
-  console.log('📋 SUPPORTED FILE FORMATS:');
-  console.log('   • Text files (TXT) - Best quality with Gemini/GPT');
+  console.log('📋 SUPPORTED FORMATS:');
   console.log('   • PDFs (with structure preservation)');
-  console.log('   • JSON files (structured data)');
-  console.log('   • Images (JPG/JPEG with AI Vision)');
+  console.log('   • Images (JPG, PNG with OCR)');
+  console.log('   • DOCX (Word documents)');
+  console.log('   • Text files');
   console.log('');
   console.log('🎯 FEATURES:');
-  console.log('   • ✅ 100% Complete translation');
-  console.log('   • ✅ FREE tier with Gemini (primary)');
-  console.log('   • ✅ UTF-8 encoding (Mandarin, Hindi, etc.)');
-  console.log('   • ✅ Structure & formatting preservation');
-  console.log('   • ✅ One-way translation to English only');
-  console.log('   • ✅ AI-powered language detection & validation');
-  console.log('   • ✅ Strict source language matching');
-  console.log('   • ✅ Multi-engine fallback system');
+  console.log('   • 100% Complete translation');
+  console.log('   • FREE tier with Gemini (60 req/min)');
+  console.log('   • Structure & formatting preservation');
+  console.log('   • Multi-engine fallback');
   console.log('='.repeat(80) + '\n');
 });
