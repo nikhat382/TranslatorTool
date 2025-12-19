@@ -1,41 +1,64 @@
-.env
-node_modules/
-uploads/
-
-
-# Node / Backend
-node_modules/
+# Environment variables - NEVER COMMIT THESE!
 .env
 .env.local
-.env.development
-.env.production
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# Frontend Build
+# Dependencies
+node_modules/
+*/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Production build files
 dist/
 build/
-.vite/
+*.tgz
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.sublime-workspace
 
 # Logs
 logs/
 *.log
+npm-debug.log*
+lerna-debug.log*
 
-# OS / Editor
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# Uploads / Temp
-uploads/
+# Temp and cache
 temp/
-translated/
-.env
-node_modules/
-dist/
-build/
-.env
-node_modules/
-dist/
-build/
-.backend/node_modules/
+tmp/
+.cache/
+.parcel-cache/
 
+# OS-specific files
+Deploying...
+Build
+Checking
+Cloning
+Common
+Exited
+It
+Running
+Setting
+Uploaded
+Uploading
