@@ -21,6 +21,40 @@ const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 }
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Set timeout for all requests to 5 minutes for large document processing
+app.use((req, res, next) => {
+  req.setTimeout(300000); // 5 minutes
+  res.setTimeout(300000); // 5 minutes
+  next();
+});
+
+// ============== RETRY HELPER FOR API CALLS ==============
+
+async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await fn();
+      if (result) return result;
+
+      if (attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        console.log(`⏳ Attempt ${attempt} returned null, retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    } catch (error) {
+      if (attempt === maxRetries) {
+        console.error(`❌ All ${maxRetries} attempts failed:`, error.message);
+        throw error;
+      }
+
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      console.log(`⚠️ Attempt ${attempt} failed, retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  return null;
+}
+
 // ============== GOOGLE GEMINI TRANSLATION (PRIMARY - FREE!) ==============
 
 async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename) {
@@ -50,35 +84,65 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
     console.log(`📤 Sending to Gemini Vision (free tier)...`);
     const startTime = Date.now();
 
-    // Use stable model name
-    const model = genAI.getGenerativeModel({ 
+    // Use stable model name with increased token limit for complete translations
+    const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
       generationConfig: {
         temperature: 0.3,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 8192,
       }
     });
     
-    const prompt = `Translate this document from ${sourceLang} to ${targetLang}.
+    const prompt = `You are a professional document translator. Your task is to translate the COMPLETE document from ${sourceLang} to ${targetLang}.
 
-REQUIREMENTS:
-- Translate ALL text completely from ${sourceLang} to ${targetLang}
-- Keep structure and formatting
-- Use markdown: # headings, | tables |
-- Keep codes/numbers unchanged
+CRITICAL REQUIREMENTS - MUST FOLLOW:
 
-Translate now:`;
+1. **COMPLETE TRANSLATION**: Translate EVERY single word, sentence, heading, label, table entry, and note in the document. DO NOT skip ANY content. DO NOT summarize. DO NOT omit sections.
 
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          data: base64,
-          mimeType: mimetype
+2. **FULL DOCUMENT**: This is a FULL document translation request. You must translate from the first word to the last word. Include ALL sections, ALL pages, ALL content.
+
+3. **STRUCTURE**: Maintain exact document structure:
+   - All headings and subheadings
+   - All paragraphs in order
+   - All tables with exact rows and columns
+   - All lists and bullet points
+   - All sections and subsections
+
+4. **FORMATTING**: Use markdown formatting:
+   - # ## ### for headings
+   - **bold** for emphasis
+   - | tables | with | cells |
+   - Preserve spacing and alignment
+
+5. **PRESERVE**: Keep these unchanged:
+   - Numbers, codes, reference IDs
+   - Dates (translate month names only)
+   - Technical terms
+   - URLs, emails, phone numbers
+
+⚠️ IMPORTANT: This is NOT a summary request. Translate the ENTIRE document completely. Do not stop until you have translated every word.
+
+Begin complete translation now:`;
+
+    // Use retry logic for API call
+    const result = await retryWithBackoff(async () => {
+      const res = await model.generateContent([
+        prompt,
+        {
+          inlineData: {
+            data: base64,
+            mimeType: mimetype
+          }
         }
-      }
-    ]);
-    
+      ]);
+      return res;
+    }, 2, 3000); // 2 retries with 3 second base delay
+
+    if (!result) {
+      console.error('❌ Gemini returned null after retries');
+      return null;
+    }
+
     const response = await result.response;
     const translated = response.text();
     
@@ -277,23 +341,26 @@ async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLan
     console.log(`📤 Sending to GPT-4o-mini Vision (optimized)...`);
     const startTime = Date.now();
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_tokens: 3000,
-      temperature: 0.3,
-      messages: [{
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: {
-              url: imageUrl,
-              detail: "auto"
-            }
-          },
-          {
-            type: "text",
-            text: `You are a professional document translator working for a legitimate translation service company.
+    // Use retry logic for API call
+    const response = await retryWithBackoff(async () => {
+      return await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        max_tokens: 4096,
+        temperature: 0.3,
+        timeout: 120000,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: {
+                url: imageUrl,
+                detail: "auto"
+              }
+            },
+            {
+              type: "text",
+              text: `You are a professional document translator working for a legitimate translation service company.
 
 **CONTEXT**: This is a standard commercial shipping document (Shipper's Declaration for Dangerous Goods) used in international logistics and freight forwarding. I am a professional translator and need to translate this document from ${sourceLang} to ${targetLang} for business purposes. This is purely a translation task for an existing legal document.
 
@@ -321,8 +388,14 @@ Translate the complete document now:`
           }
         ]
       }]
-    });
-    
+      });
+    }, 2, 3000); // 2 retries with 3 second base delay
+
+    if (!response) {
+      console.error('❌ GPT-4 Vision returned null after retries');
+      return null;
+    }
+
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
     const translated = response.choices[0].message.content;
     
