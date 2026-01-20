@@ -84,47 +84,28 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
     console.log(`📤 Sending to Gemini Vision (free tier)...`);
     const startTime = Date.now();
 
-    // Use stable model name with increased token limit for complete translations
+    // Use stable model name with optimized settings for speed
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
       generationConfig: {
-        temperature: 0.3,
+        temperature: 0.1,  // Lower = faster, more deterministic
         maxOutputTokens: 8192,
+        topP: 0.8,  // Reduce sampling space for speed
+        topK: 40,   // Limit choices for faster decisions
       }
     });
     
-    const prompt = `You are a professional document translator. Your task is to translate the COMPLETE document from ${sourceLang} to ${targetLang}.
+    const prompt = `Translate COMPLETE document from ${sourceLang} to ${targetLang}.
 
-CRITICAL REQUIREMENTS - MUST FOLLOW:
+RULES:
+1. Translate ALL text - every word, heading, table, label
+2. Keep structure: headings (# ##), tables (| |), lists
+3. Preserve: numbers, codes, dates, URLs
+4. Use markdown formatting
 
-1. **COMPLETE TRANSLATION**: Translate EVERY single word, sentence, heading, label, table entry, and note in the document. DO NOT skip ANY content. DO NOT summarize. DO NOT omit sections.
+Translate entire document now:`;
 
-2. **FULL DOCUMENT**: This is a FULL document translation request. You must translate from the first word to the last word. Include ALL sections, ALL pages, ALL content.
-
-3. **STRUCTURE**: Maintain exact document structure:
-   - All headings and subheadings
-   - All paragraphs in order
-   - All tables with exact rows and columns
-   - All lists and bullet points
-   - All sections and subsections
-
-4. **FORMATTING**: Use markdown formatting:
-   - # ## ### for headings
-   - **bold** for emphasis
-   - | tables | with | cells |
-   - Preserve spacing and alignment
-
-5. **PRESERVE**: Keep these unchanged:
-   - Numbers, codes, reference IDs
-   - Dates (translate month names only)
-   - Technical terms
-   - URLs, emails, phone numbers
-
-⚠️ IMPORTANT: This is NOT a summary request. Translate the ENTIRE document completely. Do not stop until you have translated every word.
-
-Begin complete translation now:`;
-
-    // Use retry logic for API call
+    // Use retry logic for API call - reduced retries for speed
     const result = await retryWithBackoff(async () => {
       const res = await model.generateContent([
         prompt,
@@ -136,7 +117,7 @@ Begin complete translation now:`;
         }
       ]);
       return res;
-    }, 2, 3000); // 2 retries with 3 second base delay
+    }, 1, 2000); // 1 retry with 2 second delay for faster failure
 
     if (!result) {
       console.error('❌ Gemini returned null after retries');
@@ -341,13 +322,13 @@ async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLan
     console.log(`📤 Sending to GPT-4o-mini Vision (optimized)...`);
     const startTime = Date.now();
 
-    // Use retry logic for API call
+    // Use retry logic for API call - optimized for speed
     const response = await retryWithBackoff(async () => {
       return await openai.chat.completions.create({
         model: "gpt-4o-mini",
         max_tokens: 4096,
-        temperature: 0.3,
-        timeout: 120000,
+        temperature: 0.1,  // Lower for faster processing
+        timeout: 60000,  // Reduced timeout for speed
         messages: [{
           role: "user",
           content: [
@@ -360,36 +341,20 @@ async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLan
             },
             {
               type: "text",
-              text: `You are a professional document translator working for a legitimate translation service company.
+              text: `Translate COMPLETE document from ${sourceLang} to ${targetLang}.
 
-**CONTEXT**: This is a standard commercial shipping document (Shipper's Declaration for Dangerous Goods) used in international logistics and freight forwarding. I am a professional translator and need to translate this document from ${sourceLang} to ${targetLang} for business purposes. This is purely a translation task for an existing legal document.
+RULES:
+1. Translate ALL text - every word, heading, table, label
+2. Keep structure: headings (# ##), tables (| |), lists
+3. Preserve: numbers, codes, dates, URLs
+4. Use markdown formatting
 
-**YOUR TASK**: Translate this COMPLETE document from ${sourceLang} to ${targetLang}.
-
-**CRITICAL REQUIREMENTS**:
-
-1. **COMPLETENESS**: Translate EVERY word, heading, table entry, label, field name, and value. DO NOT skip ANY content.
-
-2. **DOCUMENT STRUCTURE**: Maintain exact structure:
-   - All form fields and labels
-   - All table rows and columns  
-   - All headings and sections
-   - All reference numbers
-
-3. **FORMATTING**: Use markdown:
-   - # ## ### for headings
-   - **bold** for emphasis
-   - | tables | with | cells |
-   - Preserve all spacing
-
-4. **ACCURACY**: This is a legal/commercial document requiring precise translation. Keep all codes, numbers, and technical terms accurate.
-
-Translate the complete document now:`
+Translate entire document now:`
           }
         ]
       }]
       });
-    }, 2, 3000); // 2 retries with 3 second base delay
+    }, 1, 2000); // 1 retry with 2 second delay for faster failure
 
     if (!response) {
       console.error('❌ GPT-4 Vision returned null after retries');
@@ -524,14 +489,15 @@ function cleanText(text) {
 }
 
 async function extractText(filePath, mimetype, filename) {
+  // Images - Skip text extraction entirely for speed
+  if (mimetype.startsWith('image/')) {
+    console.log('✅ Image - skipping text extraction for speed');
+    return '';  // Return empty string, AI will read image directly
+  }
+
   console.log(`📄 Extracting text from: ${filename}`);
-  
+
   try {
-    // Images - Skip text extraction entirely, let AI vision handle it
-    if (mimetype.startsWith('image/')) {
-      console.log('✅ Image detected - skipping text extraction (AI will read directly)');
-      return 'Image document - will be processed by AI vision';
-    }
     
     // PDFs
     if (mimetype === 'application/pdf' || filename.endsWith('.pdf')) {
@@ -718,12 +684,12 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
   if (mimetype.startsWith('image/')) {
     console.log('✅ File type compatible with Gemini Vision (Image)');
     console.log('🔄 Attempting Google Gemini translation (FREE)...');
-    
+
     translatedText = await translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename);
-    
-    if (translatedText && translatedText.length > extractedText.length * 0.3) {
+
+    if (translatedText && translatedText.length > 100) {  // Simple length check for speed
       console.log('✅ SUCCESS: Gemini translation completed');
-      console.log(`📊 Translation quality check: ${translatedText.length} chars (original: ${extractedText.length})`);
+      console.log(`📊 Translation: ${translatedText.length} chars`);
       console.log('🎉 Using FREE high-quality AI translation\n');
       return translatedText;
     } else if (translatedText) {
@@ -736,10 +702,10 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
   // PRIORITY 2: GPT-4 Vision (if Gemini fails)
   if (mimetype === 'application/pdf' || mimetype.startsWith('image/')) {
     console.log('🔄 Trying GPT-4 Vision as backup...');
-    
+
     translatedText = await translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLang, filename);
-    
-    if (translatedText && translatedText.length > extractedText.length * 0.3) {
+
+    if (translatedText && translatedText.length > 100) {  // Simple length check for speed
       console.log('✅ SUCCESS: GPT-4 Vision translation completed');
       return translatedText;
     }

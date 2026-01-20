@@ -50,18 +50,18 @@ const TranslatorTool = () => {
     setProgress(0);
     
     try {
-      // Step 1: Extraction (fast)
+      // Step 1: Extraction (instant for images, fast for others)
       setExtracting(true);
       setParsing(false);
       setTranslating(false);
       setProgress(10);
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, 100));
       setExtracting(false);
 
       // Step 2: Parsing (fast)
       setParsing(true);
       setProgress(20);
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, 100));
       setParsing(false);
 
       // Step 3: Real Translation
@@ -73,16 +73,20 @@ const TranslatorTool = () => {
       formData.append('sourceLang', sourceLang);
       formData.append('targetLang', targetLang);
 
-      // Progress simulation during API call (max 90%, then wait for real completion)
+      // Optimized progress simulation - smoother and faster completion
       const progressInterval = setInterval(() => {
-        setProgress(prev => (prev < 90 ? prev + 10 : 90));
-      }, 400);
+        setProgress(prev => {
+          if (prev < 70) return prev + 15; // Fast initial progress
+          if (prev < 95) return prev + 5;  // Slower near completion
+          return 95; // Stop at 95% and wait for real completion
+        });
+      }, 600); // Update every 600ms for smoother feel
 
-      // Add timeout (45 seconds max)
+      // Reduced timeout (30 seconds max) for faster failure detection
       const timeoutId = setTimeout(() => {
         clearInterval(progressInterval);
         throw new Error('Translation timeout - file may be too large or service is slow');
-      }, 45000);
+      }, 30000);
 
       const response = await fetch(`${API_URL}/translate`, {
         method: 'POST',
@@ -410,9 +414,9 @@ Generated: ${new Date().toLocaleString()}
   // Download PDF with server-side generation
 const downloadPDF = async () => {
   if (!translationResults) return;
-  
+
   try {
-    const response = await fetch('http://localhost:5000/api/generate-pdf', {
+    const response = await fetch(`${API_URL}/generate-pdf`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
