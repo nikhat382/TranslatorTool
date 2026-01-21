@@ -3,7 +3,7 @@ import multer from 'multer';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import { dirname, join } from 'path';
 import fs from 'fs/promises';
 import { createRequire } from 'module';
 import mammoth from 'mammoth';
@@ -12,6 +12,9 @@ import PDFDocument from 'pdfkit';
 
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 dotenv.config();
 
@@ -1111,6 +1114,17 @@ app.post('/api/test-translate', express.json(), async (req, res) => {
       error: error.message
     });
   }
+});
+
+// ============== SERVE FRONTEND STATIC FILES ==============
+
+// Serve static files from frontend build
+const frontendBuildPath = join(__dirname, '..', 'frontend', 'dist');
+app.use(express.static(frontendBuildPath));
+
+// Catch-all route to serve index.html for any non-API routes
+app.get('*', (req, res) => {
+  res.sendFile(join(frontendBuildPath, 'index.html'));
 });
 
 const PORT = process.env.PORT || 5000;
