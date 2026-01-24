@@ -60,9 +60,9 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
 
 // ============== GOOGLE GEMINI TRANSLATION (PRIMARY - FREE!) ==============
 
-async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename) {
+async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename, fileBuffer = null) {
   console.log('🤖 PRIMARY METHOD: Google Gemini (FREE)...');
-  
+
   if (!process.env.GEMINI_API_KEY) {
     console.log('⚠️ No GEMINI_API_KEY found');
     console.log('💡 Get free key at: https://aistudio.google.com/app/apikey');
@@ -72,33 +72,34 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
   try {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    
-    const fileBuffer = await fs.readFile(filePath);
+
+    // Reuse buffer if provided, otherwise read
+    if (!fileBuffer) {
+      fileBuffer = await fs.readFile(filePath);
+    }
     const base64 = fileBuffer.toString('base64');
-    
-    console.log(`📊 File details: ${mimetype}, ${(fileBuffer.length / 1024).toFixed(2)} KB`);
-    
+
     // Gemini supports images
     if (!mimetype.startsWith('image/')) {
-      console.log('⚠️ Gemini works best with images');
       return null;
     }
 
-    console.log(`📤 Sending to Gemini Vision (free tier)...`);
     const startTime = Date.now();
 
-    // Use fastest Gemini model with maximum speed optimization
+    // Use FASTEST Gemini model with ULTRA speed optimization
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash-8b",  // Fastest model - 8B parameters
+      model: "gemini-1.5-flash",  // FASTEST stable model (faster than flash-8b for simple tasks)
       generationConfig: {
-        temperature: 0,    // 0 = maximum speed, fully deterministic
-        maxOutputTokens: 8192,
-        topP: 0.95,        // Higher = faster with good quality
-        topK: 20,          // Lower = faster decisions
+        temperature: 0,         // 0 = maximum speed, fully deterministic
+        maxOutputTokens: 4096,  // Reduced for faster generation (enough for most docs)
+        topP: 1.0,             // Maximum = fastest
+        topK: 1,               // Minimum = instant decisions
+        candidateCount: 1,     // Single response = faster
       }
     });
-    
-    const prompt = `Translate ALL text from ${sourceLang} to ${targetLang}. Keep structure. Output:`;
+
+    // ULTRA-MINIMAL prompt for maximum speed
+    const prompt = `Translate ${sourceLang} to ${targetLang}:`;
 
     // Direct API call without retry for maximum speed
     const result = await model.generateContent([
@@ -113,13 +114,11 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
 
     const response = await result.response;
     const translated = response.text();
-    
+
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
-    
-    console.log(`✅ Gemini completed in ${elapsedTime}s`);
-    console.log(`📊 Translation: ${translated.length} characters`);
-    console.log(`📝 First 200 chars: ${translated.substring(0, 200)}`);
-    
+
+    console.log(`✅ Gemini completed in ${elapsedTime}s (${translated.length} chars)`);
+
     return translated;
   } catch (error) {
     console.error('❌ Gemini FAILED');
@@ -640,7 +639,7 @@ async function translateFallback(text, sourceLang, targetLang) {
 
 // ============== MAIN TRANSLATION ORCHESTRATOR ==============
 
-async function translateDocument(filePath, mimetype, filename, sourceLang, targetLang, extractedText) {
+async function translateDocument(filePath, mimetype, filename, sourceLang, targetLang, extractedText, fileBuffer = null) {
   console.log('\n🎯 STARTING TRANSLATION ORCHESTRATION...');
   console.log(`📄 File: ${filename}`);
   console.log(`📦 Type: ${mimetype}`);
@@ -648,15 +647,15 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
   console.log(`📝 Extracted text length: ${extractedText.length} characters`);
   console.log(`📝 First 100 chars: ${extractedText.substring(0, 100)}`);
   console.log('='.repeat(80));
-  
+
   let translatedText = null;
-  
+
   // PRIORITY 1: Google Gemini (FREE, no payment needed!)
   if (mimetype.startsWith('image/')) {
     console.log('✅ File type compatible with Gemini Vision (Image)');
     console.log('🔄 Attempting Google Gemini translation (FREE)...');
 
-    translatedText = await translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename);
+    translatedText = await translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename, fileBuffer);
 
     if (translatedText && translatedText.length > 50) {  // Check for valid translation
       console.log('✅ SUCCESS: Gemini translation completed');
@@ -753,19 +752,23 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
     console.log(`🌐 Language: ${sourceLang} → ${targetLang}`);
     console.log('='.repeat(80));
 
+    // Read file buffer once and reuse
+    const fileBuffer = await fs.readFile(file.path);
+
     // Extract text (quick for images now - no OCR)
     const originalText = await extractText(file.path, file.mimetype, file.originalname);
-    
+
     console.log(`\n📝 Text extraction complete`);
 
-    // Perform translation using orchestrator
+    // Perform translation using orchestrator (pass buffer to avoid re-reading)
     const translatedText = await translateDocument(
       file.path,
       file.mimetype,
       file.originalname,
       sourceLang,
       targetLang,
-      originalText
+      originalText,
+      fileBuffer
     );
 
     // Calculate metrics (use translatedText length for word count)
@@ -774,8 +777,7 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
     const translatedWordCount = translatedText.split(/\s+/).filter(w => w).length;
     const accuracy = (96 + Math.random() * 3.5).toFixed(1);
 
-    // Create file preview
-    const fileBuffer = await fs.readFile(file.path);
+    // Create file preview (reuse already-loaded buffer)
     const dataUrl = `data:${file.mimetype};base64,${fileBuffer.toString('base64')}`;
 
     // Create segments for display (from translated text)
@@ -832,7 +834,7 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
           characterCount: translatedText.length,
           sentenceCount: translatedSents.length,
           processedAt: new Date().toLocaleString(),
-          model: "Google gemini-1.5-flash (Free Tier)",
+          model: "Google Gemini Flash (Optimized)",
           sourceLanguage: sourceLang,
           targetLanguage: targetLang,
           languagePair: `${sourceLang} → ${targetLang}`,
