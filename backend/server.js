@@ -9,6 +9,7 @@ import { createRequire } from 'module';
 import mammoth from 'mammoth';
 import Tesseract from 'tesseract.js';
 import PDFDocument from 'pdfkit';
+import crypto from 'crypto';
 
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
@@ -30,6 +31,128 @@ app.use((req, res, next) => {
   res.setTimeout(300000); // 5 minutes
   next();
 });
+
+// ============== SMART CACHING SYSTEM ==============
+
+class TranslationCache {
+  constructor(maxSize = 100, ttlMinutes = 60) {
+    this.cache = new Map();
+    this.maxSize = maxSize;
+    this.ttl = ttlMinutes * 60 * 1000; // Convert to milliseconds
+    this.stats = {
+      hits: 0,
+      misses: 0,
+      evictions: 0,
+      totalSaved: 0 // Time saved in seconds
+    };
+  }
+
+  // Generate cache key from file hash + language pair
+  generateKey(fileBuffer, sourceLang, targetLang) {
+    const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex').substring(0, 16);
+    return `${hash}_${sourceLang}_${targetLang}`;
+  }
+
+  // Get from cache
+  get(key) {
+    const entry = this.cache.get(key);
+
+    if (!entry) {
+      this.stats.misses++;
+      return null;
+    }
+
+    // Check if expired
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      this.stats.misses++;
+      return null;
+    }
+
+    this.stats.hits++;
+    this.stats.totalSaved += entry.savedTime;
+
+    // Update access time (LRU)
+    entry.lastAccessed = Date.now();
+
+    console.log(`✅ CACHE HIT! Saved ${entry.savedTime}s (Total saved: ${this.stats.totalSaved.toFixed(1)}s)`);
+    return entry.data;
+  }
+
+  // Set in cache
+  set(key, data, originalLatency) {
+    // Evict oldest if at max size
+    if (this.cache.size >= this.maxSize) {
+      const oldestKey = this.findOldest();
+      this.cache.delete(oldestKey);
+      this.stats.evictions++;
+    }
+
+    this.cache.set(key, {
+      data,
+      createdAt: Date.now(),
+      lastAccessed: Date.now(),
+      expiresAt: Date.now() + this.ttl,
+      savedTime: originalLatency
+    });
+  }
+
+  // Find least recently used entry
+  findOldest() {
+    let oldestKey = null;
+    let oldestTime = Infinity;
+
+    for (const [key, entry] of this.cache.entries()) {
+      if (entry.lastAccessed < oldestTime) {
+        oldestTime = entry.lastAccessed;
+        oldestKey = key;
+      }
+    }
+
+    return oldestKey;
+  }
+
+  // Clear expired entries
+  cleanup() {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [key, entry] of this.cache.entries()) {
+      if (now > entry.expiresAt) {
+        this.cache.delete(key);
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      console.log(`🧹 Cleaned ${cleaned} expired cache entries`);
+    }
+  }
+
+  // Get cache statistics
+  getStats() {
+    const hitRate = this.stats.hits + this.stats.misses > 0
+      ? ((this.stats.hits / (this.stats.hits + this.stats.misses)) * 100).toFixed(1)
+      : 0;
+
+    return {
+      size: this.cache.size,
+      maxSize: this.maxSize,
+      hits: this.stats.hits,
+      misses: this.stats.misses,
+      hitRate: `${hitRate}%`,
+      evictions: this.stats.evictions,
+      totalTimeSaved: `${this.stats.totalSaved.toFixed(1)}s`,
+      avgTimeSaved: this.stats.hits > 0 ? `${(this.stats.totalSaved / this.stats.hits).toFixed(2)}s` : '0s'
+    };
+  }
+}
+
+// Initialize cache: 100 translations, 1 hour TTL
+const translationCache = new TranslationCache(100, 60);
+
+// Cleanup expired entries every 10 minutes
+setInterval(() => translationCache.cleanup(), 10 * 60 * 1000);
 
 // ============== RETRY HELPER FOR API CALLS ==============
 
@@ -755,21 +878,44 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
     // Read file buffer once and reuse
     const fileBuffer = await fs.readFile(file.path);
 
-    // Extract text (quick for images now - no OCR)
-    const originalText = await extractText(file.path, file.mimetype, file.originalname);
+    // ============== CHECK CACHE FIRST ==============
+    const cacheKey = translationCache.generateKey(fileBuffer, sourceLang, targetLang);
+    const cachedResult = translationCache.get(cacheKey);
 
-    console.log(`\n📝 Text extraction complete`);
+    let translatedText;
+    let fromCache = false;
 
-    // Perform translation using orchestrator (pass buffer to avoid re-reading)
-    const translatedText = await translateDocument(
-      file.path,
-      file.mimetype,
-      file.originalname,
-      sourceLang,
-      targetLang,
-      originalText,
-      fileBuffer
-    );
+    if (cachedResult) {
+      // Cache hit! Return instantly
+      translatedText = cachedResult;
+      fromCache = true;
+      console.log('⚡ INSTANT RESPONSE FROM CACHE');
+    } else {
+      // Cache miss - perform translation
+      console.log('💾 Cache miss - performing fresh translation');
+
+      // Extract text (quick for images now - no OCR)
+      const originalText = await extractText(file.path, file.mimetype, file.originalname);
+
+      console.log(`\n📝 Text extraction complete`);
+
+      // Perform translation using orchestrator (pass buffer to avoid re-reading)
+      const translationStartTime = Date.now();
+      translatedText = await translateDocument(
+        file.path,
+        file.mimetype,
+        file.originalname,
+        sourceLang,
+        targetLang,
+        originalText,
+        fileBuffer
+      );
+
+      // Save to cache
+      const translationTime = ((Date.now() - translationStartTime) / 1000).toFixed(2);
+      translationCache.set(cacheKey, translatedText, parseFloat(translationTime));
+      console.log(`💾 Saved to cache (key: ${cacheKey.substring(0, 20)}...)`);
+    }
 
     // Calculate metrics (use translatedText length for word count)
     const latency = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -793,11 +939,15 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
     }));
 
     console.log('\n' + '='.repeat(80));
-    console.log(`✅ TRANSLATION COMPLETE`);
-    console.log(`⚡ Time: ${latency}s`);
+    console.log(`✅ TRANSLATION COMPLETE ${fromCache ? '(FROM CACHE ⚡)' : ''}`);
+    console.log(`⚡ Time: ${latency}s ${fromCache ? '(instant)' : ''}`);
     console.log(`📊 Words: ${wordCount}`);
     console.log(`🎯 Accuracy: ${accuracy}%`);
     console.log(`📦 Segments: ${segments.length}`);
+    if (fromCache) {
+      const cacheStats = translationCache.getStats();
+      console.log(`💾 Cache: ${cacheStats.hits} hits, ${cacheStats.misses} misses (${cacheStats.hitRate} hit rate)`);
+    }
     console.log('='.repeat(80) + '\n');
 
     // Cleanup
@@ -834,11 +984,13 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
           characterCount: translatedText.length,
           sentenceCount: translatedSents.length,
           processedAt: new Date().toLocaleString(),
-          model: "Google Gemini Flash (Optimized)",
+          model: fromCache ? "Cached Result (Instant)" : "Google Gemini Flash (Optimized)",
           sourceLanguage: sourceLang,
           targetLanguage: targetLang,
           languagePair: `${sourceLang} → ${targetLang}`,
-          preservedElements: ['Structure', 'Format', 'Tables', 'Hierarchy']
+          preservedElements: ['Structure', 'Format', 'Tables', 'Hierarchy'],
+          cached: fromCache,
+          cacheStats: fromCache ? translationCache.getStats() : null
         }
       }
     });
@@ -866,7 +1018,7 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ 
+  res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     services: {
@@ -874,7 +1026,37 @@ app.get('/api/health', (req, res) => {
       claude: !!process.env.ANTHROPIC_API_KEY,
       openai: !!process.env.OPENAI_API_KEY,
       openrouter: !!process.env.OPENROUTER_API_KEY
-    }
+    },
+    cache: translationCache.getStats()
+  });
+});
+
+// CACHE STATISTICS ENDPOINT
+app.get('/api/cache/stats', (req, res) => {
+  res.json({
+    success: true,
+    stats: translationCache.getStats(),
+    message: 'Cache statistics retrieved successfully'
+  });
+});
+
+// CACHE CLEAR ENDPOINT (for testing/admin)
+app.post('/api/cache/clear', (req, res) => {
+  const previousStats = translationCache.getStats();
+  translationCache.cache.clear();
+  translationCache.stats = {
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+    totalSaved: 0
+  };
+
+  console.log('🧹 Cache cleared by admin request');
+
+  res.json({
+    success: true,
+    message: 'Cache cleared successfully',
+    previousStats
   });
 });
 
