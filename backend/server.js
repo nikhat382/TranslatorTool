@@ -1116,15 +1116,19 @@ app.post('/api/test-translate', express.json(), async (req, res) => {
   }
 });
 
-// ============== SERVE FRONTEND STATIC FILES ==============
+// ============== ROOT ROUTE FOR HEALTH CHECK ==============
 
-// Serve static files from frontend build
-const frontendBuildPath = join(__dirname, '..', 'frontend', 'dist');
-app.use(express.static(frontendBuildPath));
-
-// Catch-all route to serve index.html for any non-API routes
-app.get('*', (req, res) => {
-  res.sendFile(join(frontendBuildPath, 'index.html'));
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Translatrix Pro API Server',
+    endpoints: {
+      health: '/api/health',
+      translate: 'POST /api/translate',
+      generatePdf: 'POST /api/generate-pdf',
+      testTranslate: 'POST /api/test-translate'
+    }
+  });
 });
 
 const PORT = process.env.PORT || 5000;
