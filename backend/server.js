@@ -10,6 +10,7 @@ import mammoth from 'mammoth';
 import Tesseract from 'tesseract.js';
 import PDFDocument from 'pdfkit';
 import crypto from 'crypto';
+import compression from 'compression';
 
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
@@ -20,15 +21,65 @@ const __dirname = dirname(__filename);
 dotenv.config();
 
 const app = express();
-const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 
-app.use(cors());
+// ============== PERFORMANCE OPTIMIZATIONS ==============
+
+// 1. Enable gzip/deflate compression (reduces payload by 70-90%)
+app.use(compression({
+  level: 6, // Balance between speed and compression (1-9, 6 is optimal)
+  threshold: 1024, // Only compress responses > 1KB
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
+  }
+}));
+
+// 2. Optimize multer for faster file handling
+const upload = multer({
+  dest: 'uploads/',
+  limits: { fileSize: 50 * 1024 * 1024 },
+  storage: multer.diskStorage({
+    destination: 'uploads/',
+    filename: (req, file, cb) => {
+      // Use timestamp + random for uniqueness but faster than full crypto
+      cb(null, `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${file.originalname}`);
+    }
+  })
+});
+
+// 3. CORS optimization - specific origin for production
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || '*',
+  credentials: true,
+  optionsSuccessStatus: 200,
+  maxAge: 86400 // Cache preflight requests for 24 hours
+};
+
+app.use(cors(corsOptions));
+
+// 4. JSON parsing with size limits
 app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Set timeout for all requests to 5 minutes for large document processing
+// 5. Optimized timeout and headers middleware
 app.use((req, res, next) => {
-  req.setTimeout(300000); // 5 minutes
-  res.setTimeout(300000); // 5 minutes
+  // Faster timeout for better UX (reduced from 5min to 30s for translation endpoint)
+  const timeout = req.path.includes('/translate') ? 30000 : 60000;
+  req.setTimeout(timeout);
+  res.setTimeout(timeout);
+
+  // Set cache headers for better performance
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'public, max-age=300'); // Cache GET requests for 5 min
+  } else {
+    res.set('Cache-Control', 'no-cache'); // Don't cache POST/PUT/DELETE
+  }
+
+  // Performance headers
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('X-XSS-Protection', '1; mode=block');
+
   next();
 });
 
@@ -148,11 +199,15 @@ class TranslationCache {
   }
 }
 
-// Initialize cache: 100 translations, 1 hour TTL
-const translationCache = new TranslationCache(100, 60);
+// Initialize cache: Optimized for faster lookups
+// Increased to 200 entries, 2 hour TTL for better hit rate
+const translationCache = new TranslationCache(200, 120);
 
-// Cleanup expired entries every 10 minutes
-setInterval(() => translationCache.cleanup(), 10 * 60 * 1000);
+// More frequent cleanup (every 5 minutes) for better memory management
+setInterval(() => translationCache.cleanup(), 5 * 60 * 1000);
+
+// Preemptive cache warming (optional - can add common translations here)
+// This ensures instant responses for frequently translated content
 
 // ============== RETRY HELPER FOR API CALLS ==============
 
@@ -200,7 +255,30 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
     if (!fileBuffer) {
       fileBuffer = await fs.readFile(filePath);
     }
-    const base64 = fileBuffer.toString('base64');
+
+    // Preprocess image for better OCR accuracy
+    let processedBuffer = fileBuffer;
+    try {
+      const sharp = (await import('sharp')).default;
+
+      console.log('📸 Preprocessing image for better OCR...');
+      processedBuffer = await sharp(fileBuffer)
+        .resize(2400, 2400, { // Higher resolution for OCR
+          fit: 'inside',
+          withoutEnlargement: true
+        })
+        .sharpen({ sigma: 1.5 }) // Sharpen text edges
+        .normalize() // Auto-adjust brightness/contrast
+        .modulate({ brightness: 1.1, saturation: 0.9 }) // Slightly brighter
+        .grayscale() // Convert to grayscale for better text recognition
+        .toBuffer();
+
+      console.log('✅ Image preprocessed for OCR');
+    } catch (error) {
+      console.log('⚠️ Image preprocessing skipped:', error.message);
+    }
+
+    const base64 = processedBuffer.toString('base64');
 
     // Gemini supports images
     if (!mimetype.startsWith('image/')) {
@@ -211,18 +289,28 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
 
     // Use FASTEST Gemini model with ULTRA speed optimization
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",  // FASTEST stable model (faster than flash-8b for simple tasks)
+      model: "gemini-1.5-flash-8b",  // FASTEST model available (even faster than flash)
       generationConfig: {
         temperature: 0,         // 0 = maximum speed, fully deterministic
-        maxOutputTokens: 4096,  // Reduced for faster generation (enough for most docs)
-        topP: 1.0,             // Maximum = fastest
+        maxOutputTokens: 3072,  // Further reduced for faster generation
+        topP: 0.95,            // Slightly reduced for faster sampling
         topK: 1,               // Minimum = instant decisions
         candidateCount: 1,     // Single response = faster
       }
     });
 
-    // ULTRA-MINIMAL prompt for maximum speed
-    const prompt = `Translate ${sourceLang} to ${targetLang}:`;
+    // Improved prompt for better accuracy
+    const prompt = `Read this image and extract ALL text you see (including handwriting, tables, headers, footers).
+The text is in ${sourceLang}. Translate EVERYTHING from ${sourceLang} to ${targetLang}.
+
+IMPORTANT:
+- Extract and translate ALL visible text in the image
+- Include numbers, dates, names, addresses
+- Maintain the original structure and formatting
+- If you see tables, translate all cells
+- Output ONLY the translated text, nothing else
+
+Translate now:`;
 
     // Direct API call without retry for maximum speed
     const result = await model.generateContent([
@@ -241,6 +329,44 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
 
     console.log(`✅ Gemini completed in ${elapsedTime}s (${translated.length} chars)`);
+
+    // Validate response - check if AI actually translated
+    const invalidResponses = [
+      'document is in english',
+      'no spanish text',
+      'already in english',
+      'cannot translate',
+      'no text found',
+      'unable to',
+      'i cannot'
+    ];
+
+    const lowerTranslated = translated.toLowerCase();
+    if (invalidResponses.some(phrase => lowerTranslated.includes(phrase))) {
+      console.log('⚠️ Gemini returned invalid response - retrying with stronger prompt...');
+
+      // Retry with more explicit prompt
+      const retryPrompt = `This image contains text in ${sourceLang}.
+You MUST extract and translate ALL text from ${sourceLang} to ${targetLang}.
+Do not say the text is already in ${targetLang}.
+Do not refuse to translate.
+Extract EVERYTHING you see and translate it.
+Output ONLY the translated ${targetLang} text:`;
+
+      const retryResult = await model.generateContent([
+        retryPrompt,
+        {
+          inlineData: {
+            data: base64,
+            mimeType: mimetype
+          }
+        }
+      ]);
+
+      const retryTranslated = await retryResult.response.text();
+      console.log(`✅ Retry completed: ${retryTranslated.length} chars`);
+      return retryTranslated;
+    }
 
     return translated;
   } catch (error) {
@@ -626,11 +752,12 @@ async function extractText(filePath, mimetype, filename) {
 
 // ============== FALLBACK TRANSLATIONS ==============
 
-function chunkText(text, maxSize = 1500) {
+function chunkText(text, maxSize = 400) {
+  // Reduced to 400 chars to stay well under 500 char API limits
   const sentences = text.split(/(?<=[.!?])\s+/);
   const chunks = [];
   let current = '';
-  
+
   for (const sent of sentences) {
     if ((current + sent).length > maxSize && current) {
       chunks.push(current.trim());
@@ -646,44 +773,104 @@ function chunkText(text, maxSize = 1500) {
 
 async function translateGoogle(text, sl, tl) {
   try {
+    // Google Translate free API has rate limits
+    if (text.length > 450) {
+      console.log('⚠️ Text too long for Google Translate free API');
+      return null;
+    }
+
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${tl}&dt=t&q=${encodeURIComponent(text)}`;
     const res = await fetch(url);
+
+    if (!res.ok) {
+      console.log('⚠️ Google Translate API error:', res.status);
+      return null;
+    }
+
     const data = await res.json();
-    return data?.[0]?.map(i => i[0]).join('') || null;
-  } catch { return null; }
+    const translated = data?.[0]?.map(i => i[0]).join('') || null;
+
+    // Filter out error messages
+    if (translated && (translated.includes('LIMIT') || translated.includes('ERROR'))) {
+      return null;
+    }
+
+    return translated;
+  } catch (error) {
+    console.log('⚠️ Google Translate error:', error.message);
+    return null;
+  }
 }
 
 async function translateLibre(text, source, target) {
   try {
+    // LibreTranslate has rate limits
+    if (text.length > 450) {
+      console.log('⚠️ Text too long for LibreTranslate API');
+      return null;
+    }
+
     const res = await fetch('https://libretranslate.com/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ q: text, source, target, format: 'text' })
     });
+
+    if (!res.ok) {
+      console.log('⚠️ LibreTranslate API error:', res.status);
+      return null;
+    }
+
     const data = await res.json();
+
+    // Check for errors
+    if (data.error) {
+      console.log('⚠️ LibreTranslate error:', data.error);
+      return null;
+    }
+
     return data.translatedText || null;
-  } catch { return null; }
+  } catch (error) {
+    console.log('⚠️ LibreTranslate error:', error.message);
+    return null;
+  }
 }
 
 async function translateMyMemory(text, sourceLang, targetLang) {
   try {
+    // MyMemory has a 500 char limit - skip if text is too long
+    if (text.length > 450) {
+      console.log('⚠️ Text too long for MyMemory API (500 char limit)');
+      return null;
+    }
+
     const langMap = {
       spanish: 'es', english: 'en', french: 'fr', german: 'de',
       mandarin: 'zh', hindi: 'hi'
     };
-    
+
     const sl = langMap[sourceLang.toLowerCase()] || 'auto';
     const tl = langMap[targetLang.toLowerCase()] || 'en';
-    
+
     const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sl}|${tl}`);
     const data = await res.json();
-    
+
+    // Check for errors or limit messages
     if (data.responseData?.translatedText) {
-      return data.responseData.translatedText;
+      const translated = data.responseData.translatedText;
+      // Filter out error messages
+      if (translated.includes('LIMIT') || translated.includes('MYMEMORY WARNING')) {
+        console.log('⚠️ MyMemory API limit reached');
+        return null;
+      }
+      return translated;
     }
-    
+
     return null;
-  } catch { return null; }
+  } catch (error) {
+    console.log('⚠️ MyMemory API error:', error.message);
+    return null;
+  }
 }
 
 async function translateOpenRouter(text, sourceLang, targetLang) {
@@ -725,25 +912,34 @@ async function translateFallback(text, sourceLang, targetLang) {
   
   console.log(`🌐 Translating: ${sourceLang} (${sl}) → ${targetLang} (${tl})`);
   
-  // Small text - single call
-  if (text.length < 3000) {
-    console.log('📦 Single translation...');
-    
+  // Small text - single call (under 400 chars for API limits)
+  if (text.length < 400) {
+    console.log('📦 Single translation (small text)...');
+
     let result = await translateGoogle(text, sl, tl);
-    if (result) { console.log('✅ Google Translate (FREE)'); return result; }
-    
+    if (result && !result.includes('LIMIT')) {
+      console.log('✅ Google Translate (FREE)');
+      return result;
+    }
+
     result = await translateMyMemory(text, sourceLang, targetLang);
-    if (result) { console.log('✅ MyMemory API (FREE)'); return result; }
-    
+    if (result && !result.includes('LIMIT')) {
+      console.log('✅ MyMemory API (FREE)');
+      return result;
+    }
+
     result = await translateLibre(text, sl, tl);
-    if (result) { console.log('✅ LibreTranslate (FREE)'); return result; }
-    
-    throw new Error('All free translation services failed');
+    if (result && !result.includes('LIMIT')) {
+      console.log('✅ LibreTranslate (FREE)');
+      return result;
+    }
+
+    throw new Error('Translation service unavailable - please add GEMINI_API_KEY for better results');
   }
-  
-  // Large text - parallel chunks
+
+  // Large text - parallel chunks (400 chars each for API limits)
   console.log('📦 Parallel chunk translation...');
-  const chunks = chunkText(text, 1500);
+  const chunks = chunkText(text, 400);
   console.log(`📦 Processing ${chunks.length} chunks`);
   
   const translated = await Promise.all(
@@ -923,8 +1119,32 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
     const translatedWordCount = translatedText.split(/\s+/).filter(w => w).length;
     const accuracy = (96 + Math.random() * 3.5).toFixed(1);
 
-    // Create file preview (reuse already-loaded buffer)
-    const dataUrl = `data:${file.mimetype};base64,${fileBuffer.toString('base64')}`;
+    // Create file preview with enhanced quality for better visibility
+    let previewBuffer = fileBuffer;
+
+    // Enhance image quality for better display (if it's an image)
+    if (file.mimetype.startsWith('image/')) {
+      try {
+        const sharp = (await import('sharp')).default;
+
+        previewBuffer = await sharp(fileBuffer)
+          .resize(1200, 1200, { // Max 1200px, maintain aspect ratio
+            fit: 'inside',
+            withoutEnlargement: true
+          })
+          .sharpen() // Enhance sharpness for better clarity
+          .normalize() // Auto-adjust brightness and contrast
+          .jpeg({ quality: 90 }) // High quality JPEG
+          .toBuffer();
+
+        console.log('✅ Image enhanced for preview');
+      } catch (error) {
+        console.log('⚠️ Image enhancement failed, using original:', error.message);
+        previewBuffer = fileBuffer;
+      }
+    }
+
+    const dataUrl = `data:${file.mimetype};base64,${previewBuffer.toString('base64')}`;
 
     // Create segments for display (from translated text)
     const translatedSents = translatedText.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 5);

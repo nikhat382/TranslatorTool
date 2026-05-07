@@ -355,19 +355,35 @@ ${'='.repeat(80)}
 Generated: ${new Date().toLocaleString()}
 `;
     
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const filename = `translated_${translationResults.metadata.fileName.split('.')[0]}_${Date.now()}.txt`;
+
+    // Use application/octet-stream to force download
+    const blob = new Blob([content], {
+      type: 'application/octet-stream'
+    });
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `translated_${translationResults.metadata.fileName}_${Date.now()}.txt`;
+    a.download = filename;
+    a.style.display = 'none';
+
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+
+    console.log(`✅ TXT downloaded: ${filename}`);
+    console.log(`📁 Saved to your Downloads folder`);
   };
 
-  // Download JSON with REAL translated content
+  // Download JSON with REAL translated content - Opens in new window
   const downloadJSON = () => {
     if (!translationResults) return;
-    
+
     const data = {
       translation: {
         source: {
@@ -402,15 +418,168 @@ Generated: ${new Date().toLocaleString()}
       exportedAt: new Date().toISOString(),
       exportedBy: 'SPECTRA AI Translatrix Pro v4.5'
     };
-    
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
+
+    const baseFilename = `translation_${translationResults.metadata.fileName.split('.')[0]}_${Date.now()}`;
+    const jsonString = JSON.stringify(data, null, 2);
+
+    // Create HTML page with formatted JSON viewer
+    const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>${baseFilename}.json</title>
+    <style>
+        body {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            margin: 0;
+            line-height: 1.6;
+        }
+        .header {
+            background: linear-gradient(135deg, #1CABE2, #0077C8);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(28, 171, 226, 0.3);
+        }
+        .header h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+        }
+        .header p {
+            margin: 5px 0;
+            opacity: 0.9;
+        }
+        .actions {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .btn {
+            background: #1CABE2;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .btn:hover {
+            background: #0077C8;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(28, 171, 226, 0.4);
+        }
+        .json-container {
+            background: #252526;
+            border: 1px solid #3e3e42;
+            border-radius: 8px;
+            padding: 20px;
+            overflow-x: auto;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        }
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .string { color: #ce9178; }
+        .number { color: #b5cea8; }
+        .boolean { color: #569cd6; }
+        .null { color: #569cd6; }
+        .key { color: #9cdcfe; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📄 Translation JSON Export</h1>
+        <p><strong>File:</strong> ${baseFilename}.json</p>
+        <p><strong>Generated:</strong> ${new Date().toLocaleString()}</p>
+        <p><strong>Document:</strong> ${translationResults.metadata.fileName}</p>
+    </div>
+
+    <div class="actions">
+        <button class="btn" onclick="downloadJSON()">💾 Download JSON File</button>
+        <button class="btn" onclick="copyToClipboard()">📋 Copy to Clipboard</button>
+        <button class="btn" onclick="window.print()">🖨️ Print</button>
+    </div>
+
+    <div class="json-container">
+        <pre id="json-content"></pre>
+    </div>
+
+    <script>
+        const jsonData = ${jsonString};
+        const filename = '${baseFilename}.json';
+
+        // Syntax highlight and display JSON
+        function syntaxHighlight(json) {
+            json = JSON.stringify(json, null, 2);
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return json.replace(/("(\\\\u[a-zA-Z0-9]{4}|\\\\[^u]|[^\\\\"])*"(\\s*:)?|\\b(true|false|null)\\b|-?\\d+(?:\\.\\d*)?(?:[eE][+\\-]?\\d+)?)/g, function (match) {
+                let cls = 'number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'key';
+                    } else {
+                        cls = 'string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+
+        // Display formatted JSON on page load
+        document.getElementById('json-content').innerHTML = syntaxHighlight(jsonData);
+
+        function downloadJSON() {
+            const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            alert('✅ JSON file downloaded to your Downloads folder!');
+        }
+
+        function copyToClipboard() {
+            const text = JSON.stringify(jsonData, null, 2);
+            navigator.clipboard.writeText(text).then(() => {
+                alert('✅ JSON copied to clipboard!');
+            }).catch(err => {
+                alert('❌ Failed to copy: ' + err);
+            });
+        }
+    </script>
+</body>
+</html>`;
+
+    // Download HTML file instead of opening in new window
+    const htmlBlob = new Blob([htmlContent], { type: 'text/html' });
+    const url = URL.createObjectURL(htmlBlob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `translation_${Date.now()}.json`;
+    a.download = `${baseFilename}.html`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
+
+    console.log(`✅ JSON viewer downloaded: ${baseFilename}.html`)
   };
+
   // Download PDF with server-side generation
 const downloadPDF = async () => {
   if (!translationResults) return;
@@ -435,14 +604,24 @@ const downloadPDF = async () => {
     }
 
     const blob = await response.blob();
+    const filename = `translation_report_${translationResults.metadata.fileName.split('.')[0]}_${Date.now()}.pdf`;
+
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `translation_report_${Date.now()}.pdf`;
+    a.download = filename;
+    a.style.display = 'none';
+
     document.body.appendChild(a);
     a.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(a);
+
+    setTimeout(() => {
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    }, 100);
+
+    console.log(`✅ PDF downloaded: ${filename}`);
+    console.log(`📁 Saved to your Downloads folder`);
   } catch (error) {
     console.error('PDF download failed:', error);
     alert('Failed to download PDF. Please try again.');

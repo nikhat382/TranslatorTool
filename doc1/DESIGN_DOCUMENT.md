@@ -344,7 +344,7 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
 You are a professional document translator. Translate this COMPLETE [filename] document from [sourceLang] to [targetLang].
 
 CRITICAL TRANSLATION REQUIREMENTS - FOLLOW EXACTLY:
-
+``1
 1. COMPLETENESS: Translate EVERY single word, sentence, heading...
 2. STRUCTURE PRESERVATION: Maintain EXACT document structure...
 3. FORMATTING: Preserve ALL formatting elements...
@@ -376,7 +376,7 @@ YOUR TASK: Provide a COMPLETE, WORD-FOR-WORD translation...
 
 ### 6.1 Complete Translation Flow
 
-```
+```-
 ┌─────────────────────────────────────────────────────────────┐
 │ 1. USER UPLOADS FILE                                         │
 │    - Select source language                                  │
@@ -400,7 +400,7 @@ YOUR TASK: Provide a COMPLETE, WORD-FOR-WORD translation...
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 4. TEXT EXTRACTION                                           │
+│ 4-. TEXT EXTRACTION                                           │
 │    - Identify file type (PDF/DOCX/TXT/Image)                 │
 │    - Extract text using appropriate method                   │
 │    - For images: Skip extraction (AI will read directly)     │
@@ -474,9 +474,7 @@ YOUR TASK: Provide a COMPLETE, WORD-FOR-WORD translation...
 │    - Export options (TXT, JSON, PDF)                         │
 │    - Reverse translation option                              │
 └─────────────────────────────────────────────────────────────┘
-```
-
-### 6.2 Reverse Translation Flow
+```### 6.2 Reverse Translation Flow
 
 ```
 User clicks "Reverse Translation"
