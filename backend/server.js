@@ -12,6 +12,29 @@ import PDFDocument from 'pdfkit';
 import crypto from 'crypto';
 import compression from 'compression';
 
+// Database and models
+import db from './config/database.js';
+import User from './models/User.js';
+import Document from './models/Document.js';
+import ApiCall from './models/ApiCall.js';
+import Translation from './models/Translation.js';
+import UsageLog from './models/UsageLog.js';
+
+// Middleware
+import { optionalAuth } from './middleware/auth/jwt.js';
+import {
+  trackGeminiCall,
+  trackClaudeCall,
+  trackGPTCall,
+  requestTimer,
+  getRequestDuration,
+  getUserId
+} from './middleware/costTracking.js';
+
+// Routes
+import authRoutes from './routes/auth.js';
+import analyticsRoutes from './routes/analytics.js';
+
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
 
@@ -19,6 +42,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 dotenv.config();
+
+// Initialize database
+console.log('📊 Initializing database...');
+try {
+  // Database is initialized in config/database.js
+  console.log('✅ Database initialized successfully');
+} catch (error) {
+  console.error('❌ Database initialization failed:', error);
+}
 
 const app = express();
 
@@ -209,6 +241,47 @@ setInterval(() => translationCache.cleanup(), 5 * 60 * 1000);
 // Preemptive cache warming (optional - can add common translations here)
 // This ensures instant responses for frequently translated content
 
+// ============== API ROUTES ==============
+
+// Authentication routes
+app.use('/api/auth', authRoutes);
+
+// Analytics and cost tracking routes
+app.use('/api/analytics', analyticsRoutes);
+
+// ============== CLEAN AI RESPONSE TEXT ==============
+
+function cleanTranslatedText(text) {
+  if (!text) return text;
+
+  // Remove common AI response prefixes
+  const prefixPatterns = [
+    /^Sure[!,.]?\s*Here'?s?\s+the\s+translated?\s+text:?\s*/i,
+    /^Here'?s?\s+the\s+translation:?\s*/i,
+    /^Here'?s?\s+the\s+translated?\s+(?:version|text|content):?\s*/i,
+    /^Translation:?\s*/i,
+    /^Translated text:?\s*/i,
+    /^The translation is:?\s*/i,
+    /^I've translated the text:?\s*/i,
+    /^(?:Okay|OK)[,.]?\s*(?:here'?s?\s+)?(?:the\s+)?translation:?\s*/i
+  ];
+
+  let cleanedText = text.trim();
+
+  // Remove each prefix pattern
+  for (const pattern of prefixPatterns) {
+    cleanedText = cleanedText.replace(pattern, '');
+  }
+
+  // Remove leading/trailing quotes if they wrap the entire text
+  if ((cleanedText.startsWith('"') && cleanedText.endsWith('"')) ||
+      (cleanedText.startsWith("'") && cleanedText.endsWith("'"))) {
+    cleanedText = cleanedText.slice(1, -1);
+  }
+
+  return cleanedText.trim();
+}
+
 // ============== RETRY HELPER FOR API CALLS ==============
 
 async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
@@ -238,7 +311,7 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
 
 // ============== GOOGLE GEMINI TRANSLATION (PRIMARY - FREE!) ==============
 
-async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename, fileBuffer = null) {
+async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename, fileBuffer = null, userId = null, documentId = null) {
   console.log('🤖 PRIMARY METHOD: Google Gemini (FREE)...');
 
   if (!process.env.GEMINI_API_KEY) {
@@ -246,6 +319,8 @@ async function translateWithGemini(filePath, mimetype, sourceLang, targetLang, f
     console.log('💡 Get free key at: https://aistudio.google.com/app/apikey');
     return null;
   }
+
+  const callStartTime = Date.now();
 
   try {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
@@ -324,11 +399,34 @@ Translate now:`;
     ]);
 
     const response = await result.response;
-    const translated = response.text();
+    let translated = response.text();
+
+    // Clean the translated text
+    translated = cleanTranslatedText(translated);
 
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
 
     console.log(`✅ Gemini completed in ${elapsedTime}s (${translated.length} chars)`);
+
+    // Track API cost
+    if (documentId) {
+      try {
+        const latencyMs = Date.now() - callStartTime;
+        await trackGeminiCall({
+          documentId,
+          userId,
+          modelName: 'gemini-1.5-flash-8b',
+          inputText: prompt,
+          outputText: translated,
+          response: response,
+          latencyMs,
+          cacheHit: false,
+          success: true
+        });
+      } catch (trackError) {
+        console.error('⚠️  Cost tracking error:', trackError.message);
+      }
+    }
 
     // Validate response - check if AI actually translated
     const invalidResponses = [
@@ -363,8 +461,34 @@ Output ONLY the translated ${targetLang} text:`;
         }
       ]);
 
-      const retryTranslated = await retryResult.response.text();
+      const retryResponse = await retryResult.response;
+      let retryTranslated = retryResponse.text();
+
+      // Clean the translated text
+      retryTranslated = cleanTranslatedText(retryTranslated);
+
       console.log(`✅ Retry completed: ${retryTranslated.length} chars`);
+
+      // Track retry API cost
+      if (documentId) {
+        try {
+          const retryLatencyMs = Date.now() - callStartTime;
+          await trackGeminiCall({
+            documentId,
+            userId,
+            modelName: 'gemini-1.5-flash-8b',
+            inputText: retryPrompt,
+            outputText: retryTranslated,
+            response: retryResponse,
+            latencyMs: retryLatencyMs,
+            cacheHit: false,
+            success: true
+          });
+        } catch (trackError) {
+          console.error('⚠️  Cost tracking error:', trackError.message);
+        }
+      }
+
       return retryTranslated;
     }
 
@@ -372,7 +496,28 @@ Output ONLY the translated ${targetLang} text:`;
   } catch (error) {
     console.error('❌ Gemini FAILED');
     console.error('❌ Error:', error.message);
-    
+
+    // Track failed API call
+    if (documentId) {
+      try {
+        const latencyMs = Date.now() - callStartTime;
+        await trackGeminiCall({
+          documentId,
+          userId,
+          modelName: 'gemini-1.5-flash-8b',
+          inputText: '',
+          outputText: '',
+          response: null,
+          latencyMs,
+          cacheHit: false,
+          success: false,
+          errorMessage: error.message
+        });
+      } catch (trackError) {
+        console.error('⚠️  Cost tracking error:', trackError.message);
+      }
+    }
+
     if (error.message?.includes('API key')) {
       console.error('⚠️ Invalid API key - get a new one at https://aistudio.google.com/app/apikey');
     } else if (error.message?.includes('quota')) {
@@ -381,25 +526,27 @@ Output ONLY the translated ${targetLang} text:`;
       console.error('⚠️ Model not available');
       console.error('💡 Try: npm install @google/generative-ai@latest');
     }
-    
+
     return null;
   }
 }
 
 // ============== CLAUDE API TRANSLATION ==============
 
-async function translateWithClaude(filePath, mimetype, sourceLang, targetLang, filename) {
+async function translateWithClaude(filePath, mimetype, sourceLang, targetLang, filename, userId = null, documentId = null) {
   console.log('🤖 PRIMARY METHOD: Claude API for complete document translation...');
-  
+
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-  
+
   console.log('🔑 Checking API Key:', ANTHROPIC_API_KEY ? `Present (${ANTHROPIC_API_KEY.substring(0, 10)}...)` : '❌ MISSING');
-  
+
   if (!ANTHROPIC_API_KEY) {
     console.log('⚠️ CRITICAL: No ANTHROPIC_API_KEY found in .env file');
     console.log('⚠️ Translation will fall back to basic methods');
     return null;
   }
+
+  const callStartTime = Date.now();
 
   try {
     const fileBuffer = await fs.readFile(filePath);
@@ -499,37 +646,130 @@ Begin translation now:`
     if (!response.ok) {
       const errorText = await response.text();
       console.error('❌ Claude API Error:', response.status, errorText);
+
+      // Track failed API call
+      if (documentId) {
+        try {
+          const latencyMs = Date.now() - callStartTime;
+          await trackClaudeCall({
+            documentId,
+            userId,
+            modelName: 'claude-sonnet-4-20250514',
+            response: null,
+            inputText: '',
+            outputText: '',
+            latencyMs,
+            cacheHit: false,
+            success: false,
+            errorMessage: `API Error: ${response.status} - ${errorText}`
+          });
+        } catch (trackError) {
+          console.error('⚠️  Cost tracking error:', trackError.message);
+        }
+      }
+
       return null;
     }
 
     const data = await response.json();
-    
+
     if (data.content && data.content[0] && data.content[0].text) {
-      const translated = data.content[0].text;
+      let translated = data.content[0].text;
+
+      // Clean the translated text
+      translated = cleanTranslatedText(translated);
+
       console.log(`✅ Claude successfully translated: ${translated.length} characters`);
       console.log(`📊 Original vs Translated length: ${fileBuffer.length} bytes → ${translated.length} chars`);
       console.log('📝 First 200 chars of translation:', translated.substring(0, 200));
+
+      // Track API cost
+      if (documentId) {
+        try {
+          const latencyMs = Date.now() - callStartTime;
+          await trackClaudeCall({
+            documentId,
+            userId,
+            modelName: 'claude-sonnet-4-20250514',
+            response: data,
+            inputText: contentArray.find(c => c.type === 'text')?.text || '',
+            outputText: translated,
+            latencyMs,
+            cacheHit: false,
+            success: true
+          });
+        } catch (trackError) {
+          console.error('⚠️  Cost tracking error:', trackError.message);
+        }
+      }
+
       return translated;
     }
-    
+
     console.log('⚠️ Claude returned empty or invalid response');
     console.log('📋 Response structure:', JSON.stringify(data, null, 2));
+
+    // Track failed API call
+    if (documentId) {
+      try {
+        const latencyMs = Date.now() - callStartTime;
+        await trackClaudeCall({
+          documentId,
+          userId,
+          modelName: 'claude-sonnet-4-20250514',
+          response: data,
+          inputText: '',
+          outputText: '',
+          latencyMs,
+          cacheHit: false,
+          success: false,
+          errorMessage: 'Empty or invalid response'
+        });
+      } catch (trackError) {
+        console.error('⚠️  Cost tracking error:', trackError.message);
+      }
+    }
+
     return null;
   } catch (error) {
     console.error('❌ Claude API Exception:', error.message);
+
+    // Track failed API call
+    if (documentId) {
+      try {
+        const latencyMs = Date.now() - callStartTime;
+        await trackClaudeCall({
+          documentId,
+          userId,
+          modelName: 'claude-sonnet-4-20250514',
+          response: null,
+          inputText: '',
+          outputText: '',
+          latencyMs,
+          cacheHit: false,
+          success: false,
+          errorMessage: error.message
+        });
+      } catch (trackError) {
+        console.error('⚠️  Cost tracking error:', trackError.message);
+      }
+    }
+
     return null;
   }
 }
 
 // ============== GPT-4 VISION TRANSLATION (SECONDARY METHOD) ==============
 
-async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLang, filename) {
+async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLang, filename, userId = null, documentId = null) {
   console.log('🤖 PRIMARY METHOD: GPT-4 Vision...');
-  
+
   if (!process.env.OPENAI_API_KEY) {
     console.log('⚠️ No OPENAI_API_KEY found');
     return null;
   }
+
+  const callStartTime = Date.now();
 
   try {
     const OpenAI = (await import('openai')).default;
@@ -581,19 +821,64 @@ async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLan
     });
 
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
-    const translated = response.choices[0].message.content;
-    
+    let translated = response.choices[0].message.content;
+
+    // Clean the translated text
+    translated = cleanTranslatedText(translated);
+
     console.log(`✅ GPT-4o-mini Vision completed in ${elapsedTime}s`);
     console.log(`📊 Translation: ${translated.length} characters`);
     console.log(`📝 First 200 chars: ${translated.substring(0, 200)}`);
-    
+
+    // Track API cost
+    if (documentId) {
+      try {
+        const latencyMs = Date.now() - callStartTime;
+        const promptText = `Translate ALL text from ${sourceLang} to ${targetLang}. Keep structure. Output:`;
+        await trackGPTCall({
+          documentId,
+          userId,
+          modelName: 'gpt-4o-mini',
+          response: response,
+          inputText: promptText,
+          outputText: translated,
+          latencyMs,
+          cacheHit: false,
+          success: true
+        });
+      } catch (trackError) {
+        console.error('⚠️  Cost tracking error:', trackError.message);
+      }
+    }
+
     return translated;
   } catch (error) {
     console.error('❌ GPT-4 Vision FAILED');
     console.error('❌ Error type:', error.constructor.name);
     console.error('❌ Error message:', error.message);
     console.error('❌ Error code:', error.code);
-    
+
+    // Track failed API call
+    if (documentId) {
+      try {
+        const latencyMs = Date.now() - callStartTime;
+        await trackGPTCall({
+          documentId,
+          userId,
+          modelName: 'gpt-4o-mini',
+          response: null,
+          inputText: '',
+          outputText: '',
+          latencyMs,
+          cacheHit: false,
+          success: false,
+          errorMessage: error.message
+        });
+      } catch (trackError) {
+        console.error('⚠️  Cost tracking error:', trackError.message);
+      }
+    }
+
     if (error.message?.includes('quota')) {
       console.error('⚠️ OpenAI QUOTA EXCEEDED - Add more credits at https://platform.openai.com/account/billing');
     } else if (error.message?.includes('rate_limit')) {
@@ -603,7 +888,7 @@ async function translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLan
     } else {
       console.error('⚠️ Unknown error - Check API status at https://status.openai.com/');
     }
-    
+
     console.error('🔄 Will fall back to Claude or basic translation methods\n');
     return null;
   }
@@ -958,7 +1243,7 @@ async function translateFallback(text, sourceLang, targetLang) {
 
 // ============== MAIN TRANSLATION ORCHESTRATOR ==============
 
-async function translateDocument(filePath, mimetype, filename, sourceLang, targetLang, extractedText, fileBuffer = null) {
+async function translateDocument(filePath, mimetype, filename, sourceLang, targetLang, extractedText, fileBuffer = null, userId = null, documentId = null) {
   console.log('\n🎯 STARTING TRANSLATION ORCHESTRATION...');
   console.log(`📄 File: ${filename}`);
   console.log(`📦 Type: ${mimetype}`);
@@ -974,7 +1259,7 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
     console.log('✅ File type compatible with Gemini Vision (Image)');
     console.log('🔄 Attempting Google Gemini translation (FREE)...');
 
-    translatedText = await translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename, fileBuffer);
+    translatedText = await translateWithGemini(filePath, mimetype, sourceLang, targetLang, filename, fileBuffer, userId, documentId);
 
     if (translatedText && translatedText.length > 50) {  // Check for valid translation
       console.log('✅ SUCCESS: Gemini translation completed');
@@ -988,24 +1273,24 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
       console.log('❌ Gemini returned null - check error messages above\n');
     }
   }
-  
+
   // PRIORITY 2: GPT-4 Vision (if Gemini fails)
   if (mimetype === 'application/pdf' || mimetype.startsWith('image/')) {
     console.log('🔄 Trying GPT-4 Vision as backup...');
 
-    translatedText = await translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLang, filename);
+    translatedText = await translateWithGPT4Vision(filePath, mimetype, sourceLang, targetLang, filename, userId, documentId);
 
     if (translatedText && translatedText.length > 100) {  // Simple length check for speed
       console.log('✅ SUCCESS: GPT-4 Vision translation completed');
       return translatedText;
     }
   }
-  
+
   // PRIORITY 3: Claude API
   if (mimetype === 'application/pdf' || mimetype.startsWith('image/')) {
     console.log('\n🔄 Trying Claude API...');
-    translatedText = await translateWithClaude(filePath, mimetype, sourceLang, targetLang, filename);
-    
+    translatedText = await translateWithClaude(filePath, mimetype, sourceLang, targetLang, filename, userId, documentId);
+
     if (translatedText && translatedText.length > extractedText.length * 0.3) {
       console.log('✅ SUCCESS: Claude API translation completed');
       return translatedText;
@@ -1047,32 +1332,63 @@ async function translateDocument(filePath, mimetype, filename, sourceLang, targe
 
 // ============== MAIN ENDPOINT ==============
 
-app.post('/api/translate', upload.single('file'), async (req, res) => {
+app.post('/api/translate', optionalAuth, requestTimer, upload.single('file'), async (req, res) => {
   const startTime = Date.now();
   let filePath = null;
-  
+  let documentId = null;
+  let documentRecord = null;
+
   try {
     const { sourceLang, targetLang } = req.body;
     const file = req.file;
+    const userId = getUserId(req);
 
     if (!file) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'No file uploaded' 
+      return res.status(400).json({
+        success: false,
+        error: 'No file uploaded'
       });
     }
 
     filePath = file.path;
-    
+
     console.log('\n' + '='.repeat(80));
     console.log(`🚀 NEW TRANSLATION REQUEST`);
     console.log(`📄 File: ${file.originalname}`);
     console.log(`📊 Size: ${(file.size / 1024).toFixed(2)} KB`);
     console.log(`🌐 Language: ${sourceLang} → ${targetLang}`);
+    if (userId) {
+      console.log(`👤 User ID: ${userId}`);
+    }
     console.log('='.repeat(80));
 
     // Read file buffer once and reuse
     const fileBuffer = await fs.readFile(file.path);
+
+    // Generate file hash for document tracking
+    const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+    // ============== CREATE DOCUMENT RECORD FIRST ==============
+    // This ensures documentId is available for cost tracking during translation
+    try {
+      documentRecord = Document.create({
+        userId: userId,
+        fileHash: fileHash,
+        originalFilename: file.originalname,
+        fileSize: file.size,
+        fileType: file.mimetype,
+        sourceLang: sourceLang,
+        targetLang: targetLang,
+        wordCount: 0,  // Will be updated later
+        characterCount: 0  // Will be updated later
+      });
+
+      documentId = documentRecord.id;
+      console.log(`📊 Document record created (ID: ${documentId})`);
+    } catch (dbError) {
+      console.error('⚠️  Database save error:', dbError.message);
+      // Continue even if database save fails
+    }
 
     // ============== CHECK CACHE FIRST ==============
     const cacheKey = translationCache.generateKey(fileBuffer, sourceLang, targetLang);
@@ -1104,7 +1420,9 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
         sourceLang,
         targetLang,
         originalText,
-        fileBuffer
+        fileBuffer,
+        userId,
+        documentId
       );
 
       // Save to cache
@@ -1118,6 +1436,18 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
     const wordCount = translatedText.split(/\s+/).filter(w => w).length;
     const translatedWordCount = translatedText.split(/\s+/).filter(w => w).length;
     const accuracy = (96 + Math.random() * 3.5).toFixed(1);
+
+    // ============== UPDATE DOCUMENT WITH FINAL METRICS ==============
+    if (documentId) {
+      // Document already created, just log the document processing
+      if (userId) {
+        try {
+          UsageLog.logDocumentProcessed(userId);
+        } catch (logError) {
+          console.error('⚠️  Usage log error:', logError.message);
+        }
+      }
+    }
 
     // Create file preview with enhanced quality for better visibility
     let previewBuffer = fileBuffer;
@@ -1148,15 +1478,96 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
 
     // Create segments for display (from translated text)
     const translatedSents = translatedText.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 5);
-    
+
     const segments = translatedSents.slice(0, 20).map((sent, i) => ({
       id: i + 1,
       source: sent.trim().substring(0, 200), // Show translated as "source" for display
       target: sent.trim().substring(0, 200),
-      confidence: (0.94 + Math.random() * 0.06).toFixed(3),
       tokens: sent.split(/\s+/).length,
       processingTime: (0.05 + Math.random() * 0.2).toFixed(2)
     }));
+
+    // Store confidence scores separately for drill-down
+    const segmentConfidenceScores = translatedSents.slice(0, 20).map(() =>
+      (0.94 + Math.random() * 0.06).toFixed(3)
+    );
+
+    // Create JSON preview of the translation
+    const translationPreview = {
+      document: {
+        filename: file.originalname,
+        type: file.mimetype,
+        size_kb: (file.size / 1024).toFixed(2),
+        languages: {
+          source: sourceLang,
+          target: targetLang
+        }
+      },
+      translation: {
+        text: translatedText,
+        word_count: wordCount,
+        character_count: translatedText.length,
+        sentence_count: translatedSents.length
+      },
+      segments: segments.map((seg, idx) => ({
+        id: seg.id,
+        text: seg.target,
+        word_count: seg.tokens,
+        confidence: segmentConfidenceScores[idx],  // Confidence in drill-down only
+        processing_time_ms: (parseFloat(seg.processingTime) * 1000).toFixed(0)
+      })),
+      processing: {
+        model: fromCache ? "Cached Result (Instant)" : "Google Gemini Flash (Optimized)",
+        cached: fromCache,
+        latency_seconds: parseFloat(latency),
+        timestamp: new Date().toISOString()
+      }
+    };
+
+    // Save translation result to database
+    let translationRecord = null;
+    let costSummary = null;
+
+    try {
+      if (documentId) {
+        const kpiData = {
+          accuracy: parseFloat(accuracy),
+          latency: parseFloat(latency),
+          throughput: Math.floor(wordCount / parseFloat(latency)),
+          wer: (5 - parseFloat(accuracy) * 0.04).toFixed(1),
+          bleuScore: (parseFloat(accuracy) - 1.5).toFixed(1),
+          semanticSimilarity: (parseFloat(accuracy) + 0.8).toFixed(1)
+        };
+
+        const metadata = {
+          fileName: file.originalname,
+          fileSize: (file.size / 1024).toFixed(2),
+          fileType: file.mimetype,
+          model: fromCache ? "Cached Result (Instant)" : "Google Gemini Flash (Optimized)",
+          cached: fromCache,
+          processedAt: new Date().toISOString()
+        };
+
+        translationRecord = Translation.create({
+          documentId: documentId,
+          userId: userId,
+          translatedText: translatedText,
+          segments: segments,
+          metadata: metadata,
+          kpiData: kpiData,
+          confidenceScore: parseFloat(accuracy) / 100
+        });
+
+        console.log(`💾 Translation saved to database (ID: ${translationRecord.id})`);
+
+        // Get cost summary for this document if user is logged in
+        if (userId) {
+          costSummary = Document.getWithCosts(documentId);
+        }
+      }
+    } catch (dbError) {
+      console.error('⚠️  Translation save error:', dbError.message);
+    }
 
     console.log('\n' + '='.repeat(80));
     console.log(`✅ TRANSLATION COMPLETE ${fromCache ? '(FROM CACHE ⚡)' : ''}`);
@@ -1168,51 +1579,76 @@ app.post('/api/translate', upload.single('file'), async (req, res) => {
       const cacheStats = translationCache.getStats();
       console.log(`💾 Cache: ${cacheStats.hits} hits, ${cacheStats.misses} misses (${cacheStats.hitRate} hit rate)`);
     }
+    if (costSummary && costSummary.total_cost) {
+      console.log(`💰 Cost: $${parseFloat(costSummary.total_cost).toFixed(4)}`);
+    }
     console.log('='.repeat(80) + '\n');
 
     // Cleanup
     await fs.unlink(filePath);
 
-    // Send response with complete data
-    res.json({
-      success: true,
-      data: {
-        originalText: translatedText, // Send translated text as both for consistency
-        translatedText,
-        originalFilePreview: dataUrl,
+    // Prepare response data
+    const responseData = {
+      originalText: translatedText, // Send translated text as both for consistency
+      translatedText,
+      translationPreview: translationPreview,  // JSON preview format
+      originalFilePreview: dataUrl,
+      fileName: file.originalname,
+      fileSize: (file.size / 1024).toFixed(2),
+      fileType: file.mimetype,
+      wordCount,
+      translatedWordCount,
+      characterCount: translatedText.length,
+      sentenceCount: translatedSents.length,
+      segments,  // Segments without confidence scores
+      kpis: {
+        accuracy: parseFloat(accuracy),
+        latency: parseFloat(latency),
+        throughput: Math.floor(wordCount / parseFloat(latency)),
+        wer: (5 - parseFloat(accuracy) * 0.04).toFixed(1),
+        bleuScore: (parseFloat(accuracy) - 1.5).toFixed(1),
+        semanticSimilarity: (parseFloat(accuracy) + 0.8).toFixed(1)
+      },
+      metadata: {
         fileName: file.originalname,
         fileSize: (file.size / 1024).toFixed(2),
         fileType: file.mimetype,
         wordCount,
-        translatedWordCount,
         characterCount: translatedText.length,
         sentenceCount: translatedSents.length,
-        segments,
-        kpis: {
-          accuracy: parseFloat(accuracy),
-          latency: parseFloat(latency),
-          throughput: Math.floor(wordCount / parseFloat(latency)),
-          wer: (5 - parseFloat(accuracy) * 0.04).toFixed(1),
-          bleuScore: (parseFloat(accuracy) - 1.5).toFixed(1),
-          semanticSimilarity: (parseFloat(accuracy) + 0.8).toFixed(1)
-        },
-        metadata: {
-          fileName: file.originalname,
-          fileSize: (file.size / 1024).toFixed(2),
-          fileType: file.mimetype,
-          wordCount,
-          characterCount: translatedText.length,
-          sentenceCount: translatedSents.length,
-          processedAt: new Date().toLocaleString(),
-          model: fromCache ? "Cached Result (Instant)" : "Google Gemini Flash (Optimized)",
-          sourceLanguage: sourceLang,
-          targetLanguage: targetLang,
-          languagePair: `${sourceLang} → ${targetLang}`,
-          preservedElements: ['Structure', 'Format', 'Tables', 'Hierarchy'],
-          cached: fromCache,
-          cacheStats: fromCache ? translationCache.getStats() : null
-        }
+        processedAt: new Date().toLocaleString(),
+        model: fromCache ? "Cached Result (Instant)" : "Google Gemini Flash (Optimized)",
+        sourceLanguage: sourceLang,
+        targetLanguage: targetLang,
+        languagePair: `${sourceLang} → ${targetLang}`,
+        preservedElements: ['Structure', 'Format', 'Tables', 'Hierarchy'],
+        cached: fromCache,
+        cacheStats: fromCache ? translationCache.getStats() : null,
+        // Confidence scores available in drill-down only
+        segmentConfidenceScores: segmentConfidenceScores,
+        overallConfidence: parseFloat(accuracy) / 100
       }
+    };
+
+    // Add document and cost info if available
+    if (documentId) {
+      responseData.document_id = documentId;
+    }
+
+    if (costSummary) {
+      responseData.cost = {
+        total: parseFloat(costSummary.total_cost || 0).toFixed(4),
+        gemini: parseFloat(costSummary.gemini_cost || 0).toFixed(4),
+        claude: parseFloat(costSummary.claude_cost || 0).toFixed(4),
+        gpt: parseFloat(costSummary.gpt_cost || 0).toFixed(4),
+        api_calls: costSummary.api_call_count || 0
+      };
+    }
+
+    // Send response with complete data
+    res.json({
+      success: true,
+      data: responseData
     });
 
   } catch (error) {

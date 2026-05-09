@@ -46,6 +46,8 @@
 
     "@google/generative-ai": "^0.24.1",
 
+    "better-sqlite3": "^12.9.0",
+
     "canvas": "^3.2.0",
 
     "compression": "^1.8.1",

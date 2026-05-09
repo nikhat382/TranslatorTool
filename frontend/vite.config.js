@@ -37,7 +37,7 @@ export default defineConfig({
   },
 
   server: {
-    port: 3000,
+    port: 5173,
     host: 'localhost',
     strictPort: false,
 
@@ -55,6 +55,6 @@ export default defineConfig({
 
   // Performance hints
   preview: {
-    port: 3000,
+    port: 5173,
   },
 });

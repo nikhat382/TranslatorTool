@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Upload, FileText, BarChart3, Download, RefreshCw, CheckCircle, Clock, AlertCircle, Zap, Target, Activity, TrendingUp, File, Code, ArrowLeftRight, ChevronDown, Eye, Languages } from 'lucide-react';
+import CostMonitoringDashboard from './CostMonitoringDashboard';
 
 const TranslatorTool = () => {
   const [file, setFile] = useState(null);
@@ -17,8 +18,23 @@ const TranslatorTool = () => {
   const [reversingTranslation, setReversingTranslation] = useState(false);
   const fileInputRef = useRef(null);
 
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [user, setUser] = useState(null);
+  const [token, setToken] = useState(null);
+  const [showAuthModal, setShowAuthModal] = useState(true); // Start with login modal
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'register'
+
+  // Cost tracking state
+  const [totalCost, setTotalCost] = useState(0);
+  const [sessionCost, setSessionCost] = useState(0);
+  const [sessionStartTime, setSessionStartTime] = useState(null);
+  const [documentCount, setDocumentCount] = useState(0);
+  const [sessionDocumentCount, setSessionDocumentCount] = useState(0);
+  const [showCostDashboard, setShowCostDashboard] = useState(false);
+
   // const API_URL = 'http://localhost:5000/api';
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
   // Supported source languages for translation TO English
   const sourceLanguages = [
@@ -42,6 +58,167 @@ const TranslatorTool = () => {
   };
 
   const SUPPORTED_EXTENSIONS = ['.jpg', '.jpeg', '.pdf', '.json', '.txt'];
+
+  // Authentication functions
+  const fetchUserProfile = async (authToken, sessionStart) => {
+    try {
+      const response = await fetch(`${API_URL}/auth/profile`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setUser(data.data.user);
+        setIsAuthenticated(true);
+        setTotalCost(data.data.user.total_cost);
+
+        // Fetch total document count
+        try {
+          const docResponse = await fetch(`${API_URL}/analytics/costs/by-document`, {
+            headers: { 'Authorization': `Bearer ${authToken}` }
+          });
+          if (docResponse.ok) {
+            const docData = await docResponse.json();
+            setDocumentCount(docData.data?.total_documents || 0);
+
+            // Calculate session-specific data
+            if (sessionStart) {
+              const sessionDocs = docData.data?.documents?.filter(doc =>
+                new Date(doc.created_at) >= new Date(sessionStart)
+              ) || [];
+              setSessionDocumentCount(sessionDocs.length);
+
+              const sessionCostTotal = sessionDocs.reduce((sum, doc) =>
+                sum + parseFloat(doc.costs.total || 0), 0
+              );
+              setSessionCost(sessionCostTotal);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to fetch document count:', err);
+        }
+      } else {
+        sessionStorage.removeItem('authToken');
+        sessionStorage.removeItem('sessionStartTime');
+        setToken(null);
+        setIsAuthenticated(false);
+        setShowAuthModal(true);
+      }
+    } catch (error) {
+      console.error('Failed to fetch profile:', error);
+    }
+  };
+
+  // No auto-login on mount - always start with login page
+
+  // Browser history management for back/forward navigation
+  useEffect(() => {
+    // Set initial history state
+    if (!window.history.state?.page) {
+      window.history.replaceState({ page: 'login' }, '', window.location.href);
+    }
+
+    // Handle browser back/forward buttons
+    const handlePopState = (event) => {
+      if (event.state?.page === 'login' || !event.state) {
+        // User pressed back to go to login page
+        setShowAuthModal(true);
+        setShowCostDashboard(false);
+      } else if (event.state?.page === 'app') {
+        // User pressed back from dashboard to app, or forward to app
+        if (token) {
+          setShowAuthModal(false);
+          setShowCostDashboard(false);
+        } else {
+          // Not authenticated, stay on login
+          window.history.replaceState({ page: 'login' }, '', window.location.href);
+        }
+      } else if (event.state?.page === 'dashboard') {
+        // User pressed forward to dashboard
+        if (token) {
+          setShowCostDashboard(true);
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [token]);
+
+  const handleLogin = async (email, password) => {
+    try {
+      const response = await fetch(`${API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await response.json();
+
+      if (data.success) {
+        const sessionStart = new Date().toISOString();
+        sessionStorage.setItem('authToken', data.data.token);
+        sessionStorage.setItem('sessionStartTime', sessionStart);
+        setToken(data.data.token);
+        setSessionStartTime(sessionStart);
+        setShowAuthModal(false);
+        // Push new history state for app view
+        window.history.pushState({ page: 'app' }, '', window.location.href);
+        // Fetch user profile with session tracking
+        await fetchUserProfile(data.data.token, sessionStart);
+      }
+      return data;
+    } catch (error) {
+      console.error('Login error:', error);
+      return { success: false, error: error.message };
+    }
+  };
+
+  const handleRegister = async (email, username, password) => {
+    try {
+      const response = await fetch(`${API_URL}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, username, password })
+      });
+      const data = await response.json();
+
+      if (data.success) {
+        const sessionStart = new Date().toISOString();
+        sessionStorage.setItem('authToken', data.data.token);
+        sessionStorage.setItem('sessionStartTime', sessionStart);
+        setToken(data.data.token);
+        setSessionStartTime(sessionStart);
+        setShowAuthModal(false);
+        // Push new history state for app view
+        window.history.pushState({ page: 'app' }, '', window.location.href);
+        // Fetch user profile with session tracking
+        await fetchUserProfile(data.data.token, sessionStart);
+      }
+      return data;
+    } catch (error) {
+      console.error('Registration error:', error);
+      return { success: false, error: error.message };
+    }
+  };
+
+  const handleLogout = () => {
+    sessionStorage.removeItem('authToken');
+    sessionStorage.removeItem('sessionStartTime');
+    setToken(null);
+    setUser(null);
+    setIsAuthenticated(false);
+    setTotalCost(0);
+    setSessionCost(0);
+    setSessionStartTime(null);
+    setDocumentCount(0);
+    setSessionDocumentCount(0);
+    setShowAuthModal(true);
+    setShowCostDashboard(false);
+    // Replace current history state with login
+    window.history.replaceState({ page: 'login' }, '', window.location.href);
+  };
 
   // Real translation API call
   const performTranslation = async (uploadedFile, sourceLang, targetLang) => {
@@ -88,8 +265,15 @@ const TranslatorTool = () => {
         throw new Error('Translation timeout - file may be too large or service is slow');
       }, 30000);
 
+      // Add authentication token if available
+      const headers = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const response = await fetch(`${API_URL}/translate`, {
         method: 'POST',
+        headers: headers,
         body: formData,
       });
 
@@ -173,6 +357,12 @@ const TranslatorTool = () => {
 
   // Validate file type
   const validateFileType = (file) => {
+    // Accept all file types - no validation needed
+    return {
+      valid: true
+    };
+
+    /* Old validation code - now disabled to accept all file types
     const fileName = file.name.toLowerCase();
     const fileExtension = fileName.substring(fileName.lastIndexOf('.'));
 
@@ -195,6 +385,7 @@ const TranslatorTool = () => {
     }
 
     return { valid: true };
+    */
   };
 
   const handleFileUpload = (e) => {
@@ -709,42 +900,140 @@ const downloadPDF = async () => {
 //   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-6">
-      <div className="max-w-7xl mx-auto">
+    <div className={`min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 ${!isAuthenticated ? 'flex items-center justify-center' : 'p-6'}`}>
+      <div className={`${!isAuthenticated ? 'w-full max-w-4xl' : 'max-w-7xl mx-auto w-full'}`}>
         {/* Header */}
         <div className="bg-gradient-to-r from-purple-600 to-blue-600 rounded-3xl shadow-2xl p-8 mb-6 border border-purple-400/20">
-          <div className="flex items-center gap-3">
-            <div className="bg-white/20 backdrop-blur-sm p-3 rounded-xl relative overflow-hidden group">
-              <div className="absolute inset-0 bg-gradient-to-r from-purple-400/0 via-white/30 to-purple-400/0 transform -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
-              <svg className="w-8 h-8 text-white relative z-10 transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" className="animate-pulse"/>
-                <circle cx="9" cy="16" r="1" fill="currentColor" className="animate-pulse" style={{animationDelay: '0.2s'}}/>
-                <circle cx="15" cy="16" r="1" fill="currentColor" className="animate-pulse" style={{animationDelay: '0.4s'}}/>
-              </svg>
-              <div className="absolute inset-0 rounded-xl border-2 border-white/0 group-hover:border-white/50 transition-all duration-300"></div>
+          <div className="flex items-center justify-between">
+            {/* Left: Icon and Title */}
+            <div className="flex items-center gap-3">
+              <div className="bg-white/20 backdrop-blur-sm p-3 rounded-xl relative overflow-hidden group">
+                <div className="absolute inset-0 bg-gradient-to-r from-purple-400/0 via-white/30 to-purple-400/0 transform -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
+                <svg className="w-8 h-8 text-white relative z-10 transform group-hover:scale-110 group-hover:rotate-12 transition-all duration-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" className="animate-pulse"/>
+                  <circle cx="9" cy="16" r="1" fill="currentColor" className="animate-pulse" style={{animationDelay: '0.2s'}}/>
+                  <circle cx="15" cy="16" r="1" fill="currentColor" className="animate-pulse" style={{animationDelay: '0.4s'}}/>
+                </svg>
+                <div className="absolute inset-0 rounded-xl border-2 border-white/0 group-hover:border-white/50 transition-all duration-300"></div>
+              </div>
+              <div>
+                <h1 className="text-4xl font-black text-white">TRANSLATRIX PRO</h1>
+                <p className="text-purple-100 font-medium mt-1">Real-Time AI Translation | OpenAI GPT-4o + Free APIs</p>
+                <p className="text-purple-200/80 text-sm mt-2">A Product of <span className="font-bold">SPECTRA AI PTE. LTD.</span> Singapore</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-4xl font-black text-white">TRANSLATRIX PRO</h1>
-              <p className="text-purple-100 font-medium mt-1">Real-Time AI Translation | OpenAI GPT-4o + Free APIs</p>
-              <p className="text-purple-200/80 text-sm mt-2">A Product of <span className="font-bold">SPECTRA AI PTE. LTD.</span> Singapore</p>
+
+            {/* Right: User Info / Auth Button */}
+            <div className="flex items-center gap-4">
+              {isAuthenticated && user ? (
+                <>
+                  {showCostDashboard && (
+                    <button
+                      onClick={() => {
+                        setShowCostDashboard(false);
+                        window.history.back();
+                      }}
+                      className="bg-purple-500 hover:bg-purple-600 backdrop-blur-sm border border-white/30 text-white px-4 py-3 rounded-xl font-semibold transition-all hover:scale-105 flex items-center gap-2"
+                    >
+                      <BarChart3 className="w-4 h-4" />
+                      Hide Dashboard
+                    </button>
+                  )}
+                  {!showCostDashboard && (
+                    <button
+                      onClick={() => {
+                        setShowCostDashboard(true);
+                        window.history.pushState({ page: 'dashboard' }, '', window.location.href);
+                      }}
+                      className="bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/30 text-white px-4 py-3 rounded-xl font-semibold transition-all hover:scale-105 flex items-center gap-2"
+                    >
+                      <BarChart3 className="w-4 h-4" />
+                      View Cost Dashboard
+                    </button>
+                  )}
+                  <div className="relative bg-gradient-to-r from-purple-600/40 to-blue-600/40 backdrop-blur-md rounded-xl p-5 border-2 border-purple-400/60 shadow-[0_0_30px_rgba(168,85,247,0.4)] animate-pulse-glow">
+                    {/* Animated border glow effect */}
+                    <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-purple-500 to-blue-500 opacity-20 blur-xl animate-glow-pulse"></div>
+
+                    {/* Content */}
+                    <div className="relative flex items-center justify-between gap-6">
+                      <div className="transform transition-transform hover:scale-105">
+                        <div className="text-purple-200 text-xs font-medium opacity-90 flex items-center gap-1">
+                          <span className="inline-block w-2 h-2 bg-green-400 rounded-full animate-ping"></span>
+                          <span className="inline-block w-2 h-2 bg-green-400 rounded-full absolute"></span>
+                          Current User
+                        </div>
+                        <div className="text-white text-lg font-bold mt-1">{user.username || user.email}</div>
+                      </div>
+                      <div className="text-right transform transition-transform hover:scale-105">
+                        <div className="text-green-200 text-xs font-medium opacity-90">Session API Cost</div>
+                        <div className="text-white text-2xl font-bold mt-1 drop-shadow-[0_0_8px_rgba(34,197,94,0.5)]">${sessionCost.toFixed(4)}</div>
+                        <div className="text-purple-300 text-xs mt-1">
+                          All Time: ${totalCost.toFixed(4)}
+                        </div>
+                      </div>
+                      <div className="text-right transform transition-transform hover:scale-105">
+                        <div className="text-green-200 text-xs font-medium opacity-90">Session Documents</div>
+                        <div className="text-white text-2xl font-bold mt-1 drop-shadow-[0_0_8px_rgba(34,197,94,0.5)]">{sessionDocumentCount}</div>
+                        <div className="text-purple-300 text-xs mt-1">
+                          All Time: {documentCount}
+                        </div>
+                      </div>
+                      {user.quota_limit && (
+                        <div className="text-right transform transition-transform hover:scale-105">
+                          <div className="text-purple-200 text-xs font-medium opacity-90">Quota Remaining</div>
+                          <div className="text-white text-xl font-bold mt-1 drop-shadow-[0_0_8px_rgba(168,85,247,0.5)]">${(user.quota_limit - totalCost).toFixed(2)}</div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {/* Logout Button - Separate and Prominent */}
+                  <button
+                    onClick={handleLogout}
+                    className="bg-red-500/20 hover:bg-red-500/30 backdrop-blur-sm border border-red-400/50 text-red-200 hover:text-white px-5 py-3 rounded-xl font-semibold transition-all hover:scale-105 flex items-center gap-2"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                    </svg>
+                    Logout
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/30 text-white px-6 py-3 rounded-xl font-semibold transition-all hover:scale-105"
+                >
+                  Login / Register
+                </button>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Error Display */}
-        {error && (
-          <div className="mb-6 bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-red-300 font-bold">Translation Error</p>
-              <p className="text-red-200 text-sm">{error}</p>
-              <p className="text-red-200/80 text-xs mt-2">Make sure the backend server is running: npm run server</p>
-            </div>
-          </div>
-        )}
+        {/* Main Content - Only show when authenticated */}
+        {isAuthenticated ? (
+          <>
+            {/* Error Display */}
+            {error && (
+              <div className="mb-6 bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-red-300 font-bold">Translation Error</p>
+                  <p className="text-red-200 text-sm">{error}</p>
+                  <p className="text-red-200/80 text-xs mt-2">Make sure the backend server is running: npm run server</p>
+                </div>
+              </div>
+            )}
 
-        {/* Main Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Cost Monitoring Dashboard */}
+            {showCostDashboard && (
+              <div className="mb-6 bg-slate-800/50 backdrop-blur-sm rounded-2xl shadow-xl p-6 border border-slate-700">
+                <CostMonitoringDashboard token={token} apiUrl={API_URL} user={user} sessionStartTime={sessionStartTime} />
+              </div>
+            )}
+
+            {/* Main Content */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Column */}
           <div className="lg:col-span-1 space-y-6">
             {/* Language Selection */}
@@ -837,14 +1126,13 @@ const downloadPDF = async () => {
               >
                 <Upload className="w-12 h-12 text-purple-400 mx-auto mb-3" />
                 <p className="text-white font-semibold mb-1">Drop file here or click to browse</p>
-                <p className="text-slate-400 text-sm font-medium">Supported: JPG, PDF, JSON, TXT only</p>
+                <p className="text-slate-400 text-sm font-medium">All file types supported</p>
                 <p className="text-slate-500 text-xs mt-1">File must match the selected source language</p>
                 <input
                   ref={fileInputRef}
                   type="file"
                   onChange={handleFileUpload}
                   className="hidden"
-                  accept=".jpg,.jpeg,.pdf,.json,.txt,image/jpeg,application/pdf,application/json,text/plain"
                 />
               </div>
               
@@ -1311,8 +1599,194 @@ const downloadPDF = async () => {
             </div>
           </div>
         </div>
+        </>
+      ) : null}
+
+        {/* Authentication Modal */}
+        {showAuthModal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-slate-800 rounded-2xl shadow-2xl border border-slate-700 w-full max-w-md relative">
+              <button
+                onClick={() => setShowAuthModal(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-white"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+              <div className="p-6 border-b border-slate-700">
+                <h2 className="text-2xl font-bold text-white">
+                  {authMode === 'login' ? 'Login' : 'Register'}
+                </h2>
+                <p className="text-slate-400 text-sm mt-1">
+                  {authMode === 'login'
+                    ? 'Access your translation history and cost tracking'
+                    : 'Create an account to track API costs'}
+                </p>
+              </div>
+              <div className="p-6">
+                {authMode === 'login' ? (
+                  <LoginForm onLogin={handleLogin} onClose={() => setShowAuthModal(false)} />
+                ) : (
+                  <RegisterForm onRegister={handleRegister} onClose={() => setShowAuthModal(false)} />
+                )}
+                <div className="mt-4 text-center">
+                  <button
+                    onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+                    className="text-purple-400 hover:text-purple-300 text-sm font-medium"
+                  >
+                    {authMode === 'login'
+                      ? "Don't have an account? Register"
+                      : 'Already have an account? Login'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
+  );
+};
+
+// Login Form Component
+const LoginForm = ({ onLogin, onClose }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const result = await onLogin(email, password);
+      if (!result.success) {
+        setError(result.error || 'Login failed');
+      }
+    } catch (err) {
+      setError('Network error. Please try again.');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div>
+        <label className="text-sm font-semibold text-slate-300 block mb-2">Email</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+          className="w-full bg-slate-700 text-white px-4 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500"
+          placeholder="your@email.com"
+        />
+      </div>
+      <div>
+        <label className="text-sm font-semibold text-slate-300 block mb-2">Password</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+          minLength={6}
+          className="w-full bg-slate-700 text-white px-4 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500"
+          placeholder="••••••"
+        />
+      </div>
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+          <p className="text-red-300 text-sm">{error}</p>
+        </div>
+      )}
+      <button
+        type="submit"
+        disabled={loading}
+        className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white py-3 rounded-xl font-semibold disabled:opacity-50 transition-all"
+      >
+        {loading ? 'Logging in...' : 'Login'}
+      </button>
+    </form>
+  );
+};
+
+// Register Form Component
+const RegisterForm = ({ onRegister, onClose }) => {
+  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const result = await onRegister(email, username, password);
+      if (!result.success) {
+        setError(result.error || 'Registration failed');
+      }
+    } catch (err) {
+      setError('Network error. Please try again.');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div>
+        <label className="text-sm font-semibold text-slate-300 block mb-2">Email</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+          className="w-full bg-slate-700 text-white px-4 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500"
+          placeholder="your@email.com"
+        />
+      </div>
+      <div>
+        <label className="text-sm font-semibold text-slate-300 block mb-2">Username</label>
+        <input
+          type="text"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          required
+          className="w-full bg-slate-700 text-white px-4 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500"
+          placeholder="Choose a username"
+        />
+      </div>
+      <div>
+        <label className="text-sm font-semibold text-slate-300 block mb-2">Password</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+          minLength={6}
+          className="w-full bg-slate-700 text-white px-4 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500"
+          placeholder="••••••"
+        />
+        {password.length > 0 && password.length < 6 && (
+          <p className="text-orange-400 text-xs mt-1">Password must be at least 6 characters</p>
+        )}
+      </div>
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+          <p className="text-red-300 text-sm">{error}</p>
+        </div>
+      )}
+      <button
+        type="submit"
+        disabled={loading}
+        className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white py-3 rounded-xl font-semibold disabled:opacity-50 transition-all"
+      >
+        {loading ? 'Creating account...' : 'Register'}
+      </button>
+    </form>
   );
 };
 
