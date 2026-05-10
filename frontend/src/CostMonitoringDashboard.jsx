@@ -11,7 +11,8 @@ const CostMonitoringDashboard = ({ token, apiUrl, user, sessionStartTime }) => {
   const [error, setError] = useState(null);
   const [dateRange, setDateRange] = useState('all'); // 'all', '7days', '30days'
   const [showTrends, setShowTrends] = useState(false);
-  const [dataView, setDataView] = useState('historical'); // 'historical' or 'session'
+  // Default to 'session' view if sessionStartTime is available, otherwise 'historical'
+  const [dataView, setDataView] = useState(sessionStartTime ? 'session' : 'historical');
 
   useEffect(() => {
     if (token) {
@@ -219,10 +220,10 @@ const CostMonitoringDashboard = ({ token, apiUrl, user, sessionStartTime }) => {
             <button
               onClick={fetchAllData}
               disabled={loading}
-              className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-700 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2 transition-colors"
+              className={`${dataView === 'session' ? 'bg-green-600 hover:bg-green-700' : 'bg-purple-600 hover:bg-purple-700'} disabled:bg-slate-700 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2 transition-colors`}
             >
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              {loading ? 'Refreshing...' : 'Refresh'}
+              {loading ? 'Refreshing...' : (dataView === 'session' ? 'Refresh Session' : 'Refresh All')}
             </button>
           </div>
         </div>

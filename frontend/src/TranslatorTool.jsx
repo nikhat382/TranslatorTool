@@ -97,8 +97,8 @@ const TranslatorTool = () => {
           console.error('Failed to fetch document count:', err);
         }
       } else {
-        sessionStorage.removeItem('authToken');
-        sessionStorage.removeItem('sessionStartTime');
+        localStorage.removeItem('authToken');
+        localStorage.removeItem('sessionStartTime');
         setToken(null);
         setIsAuthenticated(false);
         setShowAuthModal(true);
@@ -107,6 +107,22 @@ const TranslatorTool = () => {
       console.error('Failed to fetch profile:', error);
     }
   };
+
+  // Auto-login on mount if token exists
+  useEffect(() => {
+    const savedToken = localStorage.getItem('authToken');
+
+    if (savedToken) {
+      // Always set a fresh session start time for current browser session
+      const newSessionStart = new Date().toISOString();
+      localStorage.setItem('sessionStartTime', newSessionStart);
+
+      setToken(savedToken);
+      setSessionStartTime(newSessionStart);
+      setShowAuthModal(false);
+      fetchUserProfile(savedToken, newSessionStart);
+    }
+  }, []);
 
   // No auto-login on mount - always start with login page
 
@@ -158,8 +174,8 @@ const TranslatorTool = () => {
 
       if (data.success) {
         const sessionStart = new Date().toISOString();
-        sessionStorage.setItem('authToken', data.data.token);
-        sessionStorage.setItem('sessionStartTime', sessionStart);
+        localStorage.setItem('authToken', data.data.token);
+        localStorage.setItem('sessionStartTime', sessionStart);
         setToken(data.data.token);
         setSessionStartTime(sessionStart);
         setShowAuthModal(false);
@@ -186,8 +202,8 @@ const TranslatorTool = () => {
 
       if (data.success) {
         const sessionStart = new Date().toISOString();
-        sessionStorage.setItem('authToken', data.data.token);
-        sessionStorage.setItem('sessionStartTime', sessionStart);
+        localStorage.setItem('authToken', data.data.token);
+        localStorage.setItem('sessionStartTime', sessionStart);
         setToken(data.data.token);
         setSessionStartTime(sessionStart);
         setShowAuthModal(false);
@@ -204,8 +220,8 @@ const TranslatorTool = () => {
   };
 
   const handleLogout = () => {
-    sessionStorage.removeItem('authToken');
-    sessionStorage.removeItem('sessionStartTime');
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('sessionStartTime');
     setToken(null);
     setUser(null);
     setIsAuthenticated(false);
@@ -306,7 +322,6 @@ const TranslatorTool = () => {
         id: idx + 1,
         source: sent.trim() + '.',
         target: translatedSentences[idx] ? translatedSentences[idx].trim() + '.' : sent.trim() + '.',
-        confidence: 0.95 + Math.random() * 0.04,
         tokens: sent.split(/\s+/).length,
         processingTime: (Math.random() * 0.3 + 0.1).toFixed(2)
       }));
@@ -336,6 +351,11 @@ const TranslatorTool = () => {
       setTranslating(false);
       setProcessing(false);
       setProgress(0);
+
+      // Refresh session cost data after translation
+      if (token && sessionStartTime) {
+        await fetchUserProfile(token, sessionStartTime);
+      }
 
     } catch (error) {
       console.error('Translation error:', error);
@@ -521,7 +541,6 @@ Translation Model: ${translationResults.metadata.model}
 
 PERFORMANCE METRICS:
 ${'-'.repeat(80)}
-✓ Accuracy: ${translationResults.kpis.accuracy}%
 ✓ Latency: ${translationResults.kpis.latency}s
 ✓ Throughput: ${translationResults.kpis.throughput} words/sec
 ✓ WER: ${translationResults.kpis.wer}%
@@ -576,36 +595,41 @@ Generated: ${new Date().toLocaleString()}
     if (!translationResults) return;
 
     const data = {
-      translation: {
-        source: {
-          language: translationResults.metadata.sourceLanguage,
-          text: translationResults.originalText,
-          wordCount: translationResults.metadata.wordCount,
-          characterCount: translationResults.metadata.characterCount
-        },
-        target: {
-          language: translationResults.metadata.targetLanguage,
-          text: translationResults.translatedText,
-          wordCount: translationResults.translatedText.split(/\s+/).length,
-          characterCount: translationResults.translatedText.length
-        },
-        languagePair: translationResults.metadata.languagePair
-      },
       document: {
         fileName: translationResults.metadata.fileName,
         fileType: translationResults.metadata.fileType,
-        fileSize: translationResults.metadata.fileSize + ' KB'
+        fileSize: translationResults.metadata.fileSize + ' KB',
+        processedAt: translationResults.metadata.processedAt
       },
+      originalText: {
+        language: translationResults.metadata.sourceLanguage,
+        content: translationResults.originalText,
+        wordCount: translationResults.metadata.wordCount,
+        characterCount: translationResults.metadata.characterCount,
+        sentenceCount: translationResults.metadata.sentenceCount
+      },
+      englishTranslation: {
+        language: 'English',
+        content: translationResults.translatedText,
+        wordCount: translationResults.translatedText.split(/\s+/).length,
+        characterCount: translationResults.translatedText.length
+      },
+      reverseTranslation: reverseTranslation ? {
+        language: translationResults.metadata.sourceLanguage,
+        content: reverseTranslation,
+        purpose: 'Translation accuracy verification',
+        wordCount: reverseTranslation.split(/\s+/).length
+      } : null,
       segments: translationResults.segments,
       performance: {
-        accuracy: translationResults.kpis.accuracy + '%',
         latency: translationResults.kpis.latency + 's',
         throughput: translationResults.kpis.throughput + ' words/sec',
         wer: translationResults.kpis.wer + '%',
         bleuScore: translationResults.kpis.bleuScore + '%',
         semanticSimilarity: translationResults.kpis.semanticSimilarity + '%'
       },
-      metadata: translationResults.metadata,
+      translationModel: translationResults.metadata.model,
+      languagePair: translationResults.metadata.languagePair,
       exportedAt: new Date().toISOString(),
       exportedBy: 'SPECTRA AI Translatrix Pro v4.5'
     };
@@ -1201,21 +1225,8 @@ const downloadPDF = async () => {
                 
                 <div className="grid grid-cols-2 gap-3">
                   <div className={`bg-gradient-to-br rounded-xl p-4 border ${
-                    translationResults.kpis.accuracy >= 95 
-                      ? 'from-green-500/20 to-emerald-500/20 border-green-500/30' 
-                      : 'from-yellow-500/20 to-orange-500/20 border-yellow-500/30'
-                  }`}>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Target className={`w-4 h-4 ${translationResults.kpis.accuracy >= 95 ? 'text-green-400' : 'text-yellow-400'}`} />
-                      <p className={`text-xs font-semibold uppercase ${translationResults.kpis.accuracy >= 95 ? 'text-green-300' : 'text-yellow-300'}`}>Accuracy</p>
-                    </div>
-                    <p className="text-2xl font-black text-white">{translationResults.kpis.accuracy}%</p>
-                    <p className="text-xs text-slate-400 mt-1">Backend Calculated</p>
-                  </div>
-                  
-                  <div className={`bg-gradient-to-br rounded-xl p-4 border ${
-                    translationResults.kpis.latency < 3 
-                      ? 'from-blue-500/20 to-cyan-500/20 border-blue-500/30' 
+                    translationResults.kpis.latency < 3
+                      ? 'from-blue-500/20 to-cyan-500/20 border-blue-500/30'
                       : 'from-orange-500/20 to-red-500/20 border-orange-500/30'
                   }`}>
                     <div className="flex items-center gap-2 mb-2">
@@ -1225,7 +1236,7 @@ const downloadPDF = async () => {
                     <p className="text-2xl font-black text-white">{translationResults.kpis.latency}s</p>
                     <p className="text-xs text-slate-400 mt-1">Actual Time</p>
                   </div>
-                  
+
                   <div className="bg-gradient-to-br from-purple-500/20 to-pink-500/20 rounded-xl p-4 border border-purple-500/30">
                     <div className="flex items-center gap-2 mb-2">
                       <Activity className="w-4 h-4 text-purple-400" />
@@ -1234,7 +1245,7 @@ const downloadPDF = async () => {
                     <p className="text-2xl font-black text-white">{translationResults.kpis.throughput}</p>
                     <p className="text-xs text-purple-300">words/sec</p>
                   </div>
-                  
+
                   <div className="bg-gradient-to-br from-orange-500/20 to-red-500/20 rounded-xl p-4 border border-orange-500/30">
                     <div className="flex items-center gap-2 mb-2">
                       <AlertCircle className="w-4 h-4 text-orange-400" />
@@ -1242,13 +1253,18 @@ const downloadPDF = async () => {
                     </div>
                     <p className="text-2xl font-black text-white">{translationResults.kpis.wer}%</p>
                   </div>
+
+                  <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 rounded-xl p-4 border border-green-500/30">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Target className="w-4 h-4 text-green-400" />
+                      <p className="text-xs text-green-300 font-semibold uppercase">BLEU Score</p>
+                    </div>
+                    <p className="text-2xl font-black text-white">{translationResults.kpis.bleuScore}%</p>
+                    <p className="text-xs text-slate-400 mt-1">Translation Quality</p>
+                  </div>
                 </div>
                 
                 <div className="mt-4 pt-4 border-t border-slate-700">
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-slate-400 text-sm">BLEU Score</span>
-                    <span className="text-white font-bold">{translationResults.kpis.bleuScore}%</span>
-                  </div>
                   <div className="flex justify-between items-center">
                     <span className="text-slate-400 text-sm">Semantic Similarity</span>
                     <span className="text-white font-bold">{translationResults.kpis.semanticSimilarity}%</span>
@@ -1436,7 +1452,7 @@ const downloadPDF = async () => {
                     <FileText className="w-5 h-5 text-purple-400" />
                     Document Information
                   </h3>
-                  
+
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700">
                       <p className="text-slate-400 text-xs mb-1">File Name</p>
@@ -1457,6 +1473,33 @@ const downloadPDF = async () => {
                   </div>
                 </div>
 
+                {/* JSON Preview - English Translation */}
+                <div className="bg-slate-800 rounded-2xl shadow-xl p-6 border border-slate-700">
+                  <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                    <Code className="w-5 h-5 text-green-400" />
+                    English Translation (JSON Format)
+                  </h3>
+
+                  <div className="bg-slate-900 rounded-lg p-4 border border-green-500/30 overflow-auto max-h-96">
+                    <pre className="text-green-300 text-sm font-mono leading-relaxed">
+{JSON.stringify({
+  "englishTranslation": {
+    "language": "English",
+    "content": translationResults.translatedText,
+    "wordCount": translationResults.translatedText.split(/\s+/).length,
+    "characterCount": translationResults.translatedText.length
+  }
+}, null, 2)}
+                    </pre>
+                  </div>
+
+                  <div className="mt-3 bg-green-500/10 border border-green-500/30 rounded-lg p-3">
+                    <p className="text-green-300 text-xs">
+                      ✓ This JSON structure is included in your downloaded JSON file and can be parsed programmatically.
+                    </p>
+                  </div>
+                </div>
+
                 {/* Segment Analysis */}
                 <div className="bg-slate-800 rounded-2xl shadow-xl p-6 border border-slate-700">
                   <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
@@ -1472,15 +1515,6 @@ const downloadPDF = async () => {
                             Segment {segment.id}
                           </span>
                           <div className="flex items-center gap-4 flex-wrap">
-                            <div className="text-right">
-                              <p className="text-xs text-slate-400">Confidence</p>
-                              <p className={`text-sm font-bold ${
-                                segment.confidence >= 0.98 ? 'text-green-400' : 
-                                segment.confidence >= 0.95 ? 'text-yellow-400' : 'text-orange-400'
-                              }`}>
-                                {(segment.confidence * 100).toFixed(1)}%
-                              </p>
-                            </div>
                             <div className="text-right">
                               <p className="text-xs text-slate-400">Tokens</p>
                               <p className="text-sm font-bold text-blue-400">{segment.tokens}</p>
@@ -1532,7 +1566,7 @@ const downloadPDF = async () => {
                   <div className="grid grid-cols-3 gap-3 text-sm">
                     <div className="bg-slate-900/50 p-3 rounded-lg">
                       <CheckCircle className="w-6 h-6 text-green-400 mx-auto mb-2" />
-                      <p className="text-slate-300 font-semibold">&gt;95% Accuracy</p>
+                      <p className="text-slate-300 font-semibold">High Quality</p>
                     </div>
                     <div className="bg-slate-900/50 p-3 rounded-lg">
                       <Zap className="w-6 h-6 text-yellow-400 mx-auto mb-2" />
